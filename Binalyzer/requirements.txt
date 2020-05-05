@@ -1,0 +1,5 @@
+pyelftools
+capstone
+lief
+angr
+pprofile

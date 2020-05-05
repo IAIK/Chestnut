@@ -1,0 +1,9 @@
+{
+    "getpwuid": [95,41],
+    "getuid": [102],
+    "rename": [82],
+    "symlink": [88],
+    "pipe": [22],
+    "__xstat64": [137],
+    "sgx_create_enclave": [213,233]
+}

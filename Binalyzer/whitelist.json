@@ -1,0 +1,20 @@
+{
+    "libX": [41, 51, 52, 55, 99],
+    "libX11": [25],
+    "libpthread": [125],
+    "libresolv": [41, 307, 54, 51, 52, 55],
+    "ffmpeg": [2, 14, 16, 23, 25, 28, 35, 56, 98, 204],
+    "libkdeinit5": [107],
+    "busybox_LS": [99,16],
+    "busybox_DMESG": [103],
+    "busybox_CHOWN": [92,94],
+    "busybox_ENV": [],
+    "busybox_HEAD": [],
+    "busybox_TRUE": [],
+    "busybox_DIFF": [],
+    "busybox_CAT": [],
+    "busybox_PWD": [],
+    "busybox_GREP": [],
+    "git": [14,16,17,28,56,59,61,80,83,86,87,99,132,218,273,302],
+    "nginx": [16, 17, 18, 40, 41, 42, 45, 49, 50, 53, 54, 57, 83, 99, 157, 213, 218, 232, 233, 273, 288, 290]
+}

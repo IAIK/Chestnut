@@ -1,0 +1,1942 @@
+diff --git a/clang/CMakeLists.txt b/clang/CMakeLists.txt
+index 781c3eb7f2f..4eccb22d4c2 100644
+--- a/clang/CMakeLists.txt
++++ b/clang/CMakeLists.txt
+@@ -226,7 +226,7 @@ set(C_INCLUDE_DIRS "" CACHE STRING
+   "Colon separated list of directories clang will search for headers.")
+ 
+ set(GCC_INSTALL_PREFIX "" CACHE PATH "Directory where gcc is installed." )
+-set(DEFAULT_SYSROOT "" CACHE PATH
++set(DEFAULT_SYSROOT "" CACHE STRING
+   "Default <path> to all compiler invocations for --sysroot=<path>." )
+ 
+ set(ENABLE_LINKER_BUILD_ID OFF CACHE BOOL "pass --build-id to ld")
+diff --git a/clang/include/clang/Basic/CodeGenOptions.def b/clang/include/clang/Basic/CodeGenOptions.def
+index 1ecae98b13b..877a4f8baec 100644
+--- a/clang/include/clang/Basic/CodeGenOptions.def
++++ b/clang/include/clang/Basic/CodeGenOptions.def
+@@ -385,6 +385,9 @@ CODEGENOPT(BranchTargetEnforcement, 1, 0)
+ /// Whether to emit unused static constants.
+ CODEGENOPT(KeepStaticConsts, 1, 0)
+ 
++/// Embeds the call hierarchy into the IR as note.
++CODEGENOPT(EmbedCallHierarchy, 1, 0)
++
+ #undef CODEGENOPT
+ #undef ENUM_CODEGENOPT
+ #undef VALUE_CODEGENOPT
+diff --git a/clang/include/clang/Driver/Options.td b/clang/include/clang/Driver/Options.td
+index 0a60873443f..d49f58ec9e2 100644
+--- a/clang/include/clang/Driver/Options.td
++++ b/clang/include/clang/Driver/Options.td
+@@ -1235,6 +1235,14 @@ def fexperimental_isel : Flag<["-"], "fexperimental-isel">, Group<f_clang_Group>
+ def fexperimental_new_pass_manager : Flag<["-"], "fexperimental-new-pass-manager">,
+   Group<f_clang_Group>, Flags<[CC1Option]>,
+   HelpText<"Enables an experimental new pass manager in LLVM.">;
++def fautosandbox : Flag<["-"], "fautosandbox">,
++  Group<f_Group>, Flags<[DriverOption]>,
++  HelpText<"Enable automatic syscall sandboxing (implies -fembed-callhierarchy).">;
++def fembed_callhierarchy : Flag<["-"], "fembed-callhierarchy">,
++  Group<f_Group>, Flags<[DriverOption,CC1Option]>,
++  HelpText<"Embed the call hierarchy analysis result into a note section in IR.">;
++def fnoembed_callhierarchy : Flag<["-"], "fno-embed-callhierarchy">,
++  Group<f_Group>, Flags<[DriverOption,CC1Option]>;
+ def finput_charset_EQ : Joined<["-"], "finput-charset=">, Group<f_Group>;
+ def fexec_charset_EQ : Joined<["-"], "fexec-charset=">, Group<f_Group>;
+ def finstrument_functions : Flag<["-"], "finstrument-functions">, Group<f_Group>, Flags<[CC1Option]>,
+diff --git a/clang/lib/CodeGen/BackendUtil.cpp b/clang/lib/CodeGen/BackendUtil.cpp
+index 0bfcab88a3a..b4738ac878a 100644
+--- a/clang/lib/CodeGen/BackendUtil.cpp
++++ b/clang/lib/CodeGen/BackendUtil.cpp
+@@ -57,6 +57,7 @@
+ #include "llvm/Transforms/Instrumentation.h"
+ #include "llvm/Transforms/Instrumentation/AddressSanitizer.h"
+ #include "llvm/Transforms/Instrumentation/BoundsChecking.h"
++#include "llvm/Transforms/Instrumentation/CallHierarchy.h"
+ #include "llvm/Transforms/Instrumentation/GCOVProfiler.h"
+ #include "llvm/Transforms/Instrumentation/HWAddressSanitizer.h"
+ #include "llvm/Transforms/Instrumentation/InstrProfiling.h"
+@@ -1249,6 +1250,9 @@ void EmitAssemblyHelper::EmitAssemblyWithNewPassManager(
+     if (CodeGenOpts.OptimizationLevel == 0) {
+       addSanitizersAtO0(MPM, TargetTriple, LangOpts, CodeGenOpts);
+     }
++
++    if (CodeGenOpts.EmbedCallHierarchy)
++      MPM.addPass(CallHierarchyPass());
+   }
+ 
+   // FIXME: We still use the legacy pass manager to do code generation. We
+diff --git a/clang/lib/Driver/Driver.cpp b/clang/lib/Driver/Driver.cpp
+index fb8335a3695..56c9ea76ac7 100644
+--- a/clang/lib/Driver/Driver.cpp
++++ b/clang/lib/Driver/Driver.cpp
+@@ -131,6 +131,16 @@ Driver::Driver(StringRef ClangExecutable, StringRef TargetTriple,
+       TargetTriple(TargetTriple), CCCGenericGCCName(""), Saver(Alloc),
+       CheckInputsExist(true), GenReproducer(false),
+       SuppressMissingInputWarning(false) {
++  // Sloppy way to enable the use of a relative path (based on directory with
++  // the clang binary) as default sysroot.
++  if(SysRoot != "") {
++    if (llvm::sys::path::is_relative(SysRoot)) {
++      std::string Dir = llvm::sys::path::parent_path(ClangExecutable);
++      SmallString<128> P(Dir);
++      llvm::sys::path::append(P, SysRoot);
++      SysRoot = P.str();
++    }
++  }
+ 
+   // Provide a sane fallback if no VFS is specified.
+   if (!this->VFS)
+@@ -1074,6 +1084,14 @@ Compilation *Driver::BuildCompilation(ArrayRef<const char *> ArgList) {
+     A->claim();
+     PrefixDirs.push_back(A->getValue(0));
+   }
++  // If undefined, setup the default sysroot based on the target triple.
++  if (SysRoot == "") {
++    std::string Dir = llvm::sys::path::parent_path(ClangExecutable);
++    SmallString<128> P(Dir);
++    llvm::sys::path::append(P, "..", TargetTriple);
++    if (llvm::sys::fs::is_directory(P))
++      SysRoot = P.str();
++  }
+   if (const Arg *A = Args.getLastArg(options::OPT__sysroot_EQ))
+     SysRoot = A->getValue();
+   if (const Arg *A = Args.getLastArg(options::OPT__dyld_prefix_EQ))
+diff --git a/clang/lib/Driver/ToolChain.cpp b/clang/lib/Driver/ToolChain.cpp
+index cab97b1a601..75c632d9afe 100644
+--- a/clang/lib/Driver/ToolChain.cpp
++++ b/clang/lib/Driver/ToolChain.cpp
+@@ -895,6 +895,7 @@ void ToolChain::AddCXXStdlibLibArgs(const ArgList &Args,
+   switch (Type) {
+   case ToolChain::CST_Libcxx:
+     CmdArgs.push_back("-lc++");
++    CmdArgs.push_back("-lc++abi"); // FIXME HACK to enable static builds
+     break;
+ 
+   case ToolChain::CST_Libstdcxx:
+diff --git a/clang/lib/Driver/ToolChains/Clang.cpp b/clang/lib/Driver/ToolChains/Clang.cpp
+index fa025be14e4..f8c8134e61e 100644
+--- a/clang/lib/Driver/ToolChains/Clang.cpp
++++ b/clang/lib/Driver/ToolChains/Clang.cpp
+@@ -5454,6 +5454,14 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
+   Args.AddLastArg(CmdArgs, options::OPT_fexperimental_new_pass_manager,
+                   options::OPT_fno_experimental_new_pass_manager);
+ 
++  // Enable call hierarchy embedding in the compiler.
++  if (Args.hasArg(options::OPT_fautosandbox) ||
++      Args.hasFlag(options::OPT_fembed_callhierarchy,
++                   options::OPT_fnoembed_callhierarchy, false))
++    CmdArgs.push_back("-fembed-callhierarchy");
++  else
++    CmdArgs.push_back("-fno-embed-callhierarchy");
++
+   ObjCRuntime Runtime = AddObjCRuntimeArgs(Args, CmdArgs, rewriteKind);
+   RenderObjCOptions(TC, D, RawTriple, Args, Runtime, rewriteKind != RK_None,
+                     Input, CmdArgs);
+diff --git a/clang/lib/Driver/ToolChains/Gnu.cpp b/clang/lib/Driver/ToolChains/Gnu.cpp
+index da197e47662..f0d60f9fb06 100644
+--- a/clang/lib/Driver/ToolChains/Gnu.cpp
++++ b/clang/lib/Driver/ToolChains/Gnu.cpp
+@@ -453,6 +453,14 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+     }
+   }
+ 
++  // Enable call hierarchy processing in the linker.
++  if (Args.hasArg(options::OPT_fautosandbox) ||
++      Args.hasFlag(options::OPT_fembed_callhierarchy,
++                   options::OPT_fnoembed_callhierarchy, false))
++    CmdArgs.push_back("-fembed-callhierarchy");
++  else
++    CmdArgs.push_back("-fno-embed-callhierarchy");
++
+   CmdArgs.push_back("-o");
+   CmdArgs.push_back(Output.getFilename());
+ 
+@@ -475,6 +483,12 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+       CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crti.o")));
+     }
+ 
++    // Add the sandboxing object to executables when autosandboxing is enabled.
++    if (Args.hasArg(options::OPT_fautosandbox) &&
++        !Args.hasArg(options::OPT_shared))
++      CmdArgs.push_back(
++          Args.MakeArgString(ToolChain.GetFilePath("sandboxing.o")));
++
+     if (IsIAMCU)
+       CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crt0.o")));
+     else if (HasCRTBeginEndFiles) {
+@@ -594,6 +608,11 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+         CmdArgs.push_back("-lsoftfp");
+         CmdArgs.push_back("--no-as-needed");
+       }
++
++      // Link against libseccomp when building executables with autosandboxing.
++      if (Args.hasArg(options::OPT_fautosandbox) &&
++          !Args.hasArg(options::OPT_shared))
++        CmdArgs.push_back("-lseccomp");
+     }
+ 
+     if (!Args.hasArg(options::OPT_nostartfiles) && !IsIAMCU) {
+@@ -2714,6 +2733,8 @@ Generic_GCC::addLibCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+     addSystemInclude(DriverArgs, CC1Args, IncludePath);
+     return true;
+   };
++  if (AddIncludePath(SysRoot + "/include/c++"))
++    return;
+   // Android never uses the libc++ headers installed alongside the toolchain,
+   // which are generally incompatible with the NDK libraries anyway.
+   if (!getTriple().isAndroid())
+diff --git a/clang/lib/Frontend/CompilerInvocation.cpp b/clang/lib/Frontend/CompilerInvocation.cpp
+index e98a407ac42..003f7d5b7d2 100644
+--- a/clang/lib/Frontend/CompilerInvocation.cpp
++++ b/clang/lib/Frontend/CompilerInvocation.cpp
+@@ -769,6 +769,7 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
+   Opts.DebugExplicitImport = Args.hasArg(OPT_dwarf_explicit_import);
+   Opts.DebugFwdTemplateParams = Args.hasArg(OPT_debug_forward_template_params);
+   Opts.EmbedSource = Args.hasArg(OPT_gembed_source);
++  Opts.EmbedCallHierarchy = Args.hasFlag(OPT_fembed_callhierarchy, OPT_fnoembed_callhierarchy, false);
+ 
+   Opts.ForceDwarfFrameSection =
+       Args.hasFlag(OPT_fforce_dwarf_frame, OPT_fno_force_dwarf_frame, false);
+diff --git a/lld/ELF/CMakeLists.txt b/lld/ELF/CMakeLists.txt
+index b89f4436288..a9da207db6f 100644
+--- a/lld/ELF/CMakeLists.txt
++++ b/lld/ELF/CMakeLists.txt
+@@ -24,6 +24,7 @@ add_lld_library(lldELF
+   Arch/X86_64.cpp
+   ARMErrataFix.cpp
+   CallGraphSort.cpp
++  CallHierarchy.cpp
+   DWARF.cpp
+   Driver.cpp
+   DriverUtils.cpp
+diff --git a/lld/ELF/CallHierarchy.cpp b/lld/ELF/CallHierarchy.cpp
+new file mode 100644
+index 00000000000..706599b338a
+--- /dev/null
++++ b/lld/ELF/CallHierarchy.cpp
+@@ -0,0 +1,663 @@
++#include "CallHierarchy.h"
++#include "InputSection.h"
++#include "Symbols.h"
++#include "SyntheticSections.h"
++#include "lld/Common/Memory.h"
++#include "llvm/ADT/DenseMap.h"
++#include "llvm/ADT/SetVector.h"
++#include "llvm/BinaryFormat/ELF.h"
++#include "llvm/Object/ELFTypes.h"
++#include "llvm/Support/JSON.h"
++
++#include <map>
++#include <memory>
++#include <set>
++#include <sstream>
++#include <stack>
++#include <string>
++#include <vector>
++
++using namespace llvm;
++using namespace llvm::object;
++
++using namespace lld;
++using namespace lld::elf;
++
++namespace {
++struct MappingInfo {
++  bool weak;
++  InputFile *file;
++  std::string name;
++  std::string type;
++  std::vector<std::string> callTargets;
++  std::vector<std::string> indirectCallTypes;
++  std::vector<std::string> referencedFunctions;
++  std::vector<int> syscallNumbers;
++
++  MappingInfo() = default;
++  MappingInfo(std::string name, bool weak)
++      : weak(weak), file(nullptr), name(name) {}
++
++  void merge_vectors(std::vector<std::string> &lhs,
++                     const std::vector<std::string> &rhs) {
++    lhs.insert(std::end(lhs), std::begin(rhs), std::end(rhs));
++    std::sort(std::begin(lhs), std::end(lhs));
++    lhs.erase(std::unique(std::begin(lhs), std::end(lhs)), std::end(lhs));
++  }
++
++  void merge_vectors(std::vector<int> &lhs, const std::vector<int> &rhs) {
++    lhs.insert(std::end(lhs), std::begin(rhs), std::end(rhs));
++    std::sort(std::begin(lhs), std::end(lhs));
++    lhs.erase(std::unique(std::begin(lhs), std::end(lhs)), std::end(lhs));
++  }
++
++  void merge_into(const MappingInfo &rhs) {
++    if (type == "") {
++      type = rhs.type;
++      file = rhs.file;
++    }
++
++    merge_vectors(callTargets, rhs.callTargets);
++    merge_vectors(indirectCallTypes, rhs.indirectCallTypes);
++    merge_vectors(referencedFunctions, rhs.referencedFunctions);
++    merge_vectors(syscallNumbers, rhs.syscallNumbers);
++  }
++
++  bool is_interesting() const {
++    return type != "" && (callTargets.size() || indirectCallTypes.size() ||
++                          referencedFunctions.size() || syscallNumbers.size());
++  }
++};
++
++bool is_live(Symbol *sym) {
++  auto *d = dyn_cast<Defined>(sym);
++  if (d && d->section && d->section->repl)
++    return d->section->repl->isLive();
++  return true;
++}
++
++// FIXME This code poorly reinvents the wheel in terms of
++// name/symbol resolution and should be replaced with the proper linker logic.
++class FunctionMapping {
++  class FileSymbolTable {
++    DenseMap<StringRef, Symbol *> table;
++
++  public:
++    void parse_file(InputFile *file) {
++      for (Symbol *sym : file->getSymbols())
++        if (sym->isFunc())
++          table[sym->getName()] = sym;
++    }
++
++    Symbol *operator[](StringRef name) {
++      auto it = table.find(name);
++      if (it != table.end())
++        return it->second;
++      return nullptr;
++    }
++  };
++
++  std::vector<MappingInfo> functions;
++  DenseMap<InputFile *, FileSymbolTable> symbolTables;
++  DenseMap<StringRef, size_t> globalMapping;
++  DenseMap<InputFile *, DenseMap<StringRef, size_t>> localMapping;
++  DenseSet<size_t> address_taken;
++
++public:
++  std::vector<MappingInfo> &getFunctions() { return functions; }
++  const std::vector<MappingInfo> &getFunctions() const { return functions; }
++
++  MappingInfo *find_local(InputFile *scope, StringRef name) {
++    auto scopeIt = localMapping.find(scope);
++    if (scopeIt != localMapping.end()) {
++      auto localIt = scopeIt->second.find(name);
++      if (localIt != scopeIt->second.end())
++        return &(functions[localIt->second]);
++    }
++    return nullptr;
++  }
++
++  MappingInfo *find_global(StringRef name) {
++    auto globalIt = globalMapping.find(name);
++    if (globalIt != globalMapping.end())
++      return &(functions[globalIt->second]);
++    return nullptr;
++  }
++
++  MappingInfo *find(InputFile *scope, StringRef name) {
++    MappingInfo *res = find_local(scope, name);
++    if (res)
++      return res;
++    return find_global(name);
++  }
++
++  // Insert stubs into the correct lookup tables according to the binding type
++  // of the processed symbol.
++  void create_mappings(InputFile *file) {
++    // Ensure that a symbol table for the input file exists.
++    auto it = symbolTables.find(file);
++    if (it == symbolTables.end())
++      symbolTables[file].parse_file(file);
++
++    // Create or update the needed MappingInfo entries for each symbol.
++    // Local symbols are placed into the local mapping table while all other
++    // symbols will be placed in the global table.
++    for (Symbol *sym : file->getSymbols()) {
++      if (!sym->isFunc() || !is_live(sym))
++        continue;
++
++      if (sym->isLocal()) {
++        MappingInfo *res = find_local(file, sym->getName());
++        if (res)
++          continue;
++        localMapping[file][sym->getName()] = functions.size();
++        functions.emplace_back(sym->getName(), false);
++        continue;
++      }
++
++      MappingInfo *res = find_global(sym->getName());
++      if (res) {
++        if (res->weak && !sym->isWeak())
++          res->weak = false;
++        continue;
++      }
++      globalMapping[sym->getName()] = functions.size();
++      functions.emplace_back(sym->getName(), sym->isWeak());
++    }
++  }
++
++  void add_function(InputFile *scope, const MappingInfo &func) {
++    MappingInfo *info = find(scope, func.name);
++    Symbol *sym = symbolTables[scope][func.name];
++
++    // In most of the cases we have a the symbol in the same file as the
++    // mapping info. However, when, for example, assembler routines are
++    // manually annotated in a different TU then no sym is found in our
++    // simplistic symbol lookup. The following hack permits to apply such
++    // annotations by making them global strong annotations until a more
++    // correct implementation is available.
++    bool local = false;
++    bool weak = false;
++    if (sym) {
++      local = sym->isLocal();
++      weak = sym->isWeak();
++    }
++
++    // Drop functions that have not been mapped.
++    if (!info)
++      return;
++
++    // Local symbols can and should always be merged.
++    if (local) {
++      info->merge_into(func);
++      for (auto &&name : info->referencedFunctions)
++        add_address_taken(scope, name);
++      info->referencedFunctions.clear();
++      return;
++    }
++
++    // Weak functions can be dropped when also a strong symbol exists.
++    if (weak && !info->weak)
++      return;
++    info->merge_into(func);
++    for (auto &&name : info->referencedFunctions)
++      add_address_taken(scope, name);
++    info->referencedFunctions.clear();
++  }
++
++  void add_address_taken(InputFile *scope, StringRef name) {
++    MappingInfo *info = find(scope, name);
++    if (info)
++      address_taken.insert(std::distance(&functions.front(), info));
++  }
++
++  bool has_address_taken(const MappingInfo *func) const {
++    auto idx = std::distance(&functions.front(), func);
++    auto it = address_taken.find(idx);
++    return it != address_taken.end();
++  }
++};
++
++struct MappingInfoRoot {
++  std::vector<MappingInfo> functions;
++  std::vector<std::string> addresses_taken;
++};
++
++// Implements Tarjan's strongly connected components algorithm.
++template <typename T> class SccAnalysis {
++public:
++  struct SccNodeObj;
++
++  using IndexType = uint64_t;
++  using EdgeType = std::pair<T *, T *>;
++  using EdgesType = std::vector<EdgeType>;
++  using SccVecType = std::vector<SccNodeObj>;
++
++  SccVecType sCCs; // FIXME make this private and expose iterators
++
++  struct NodeObj {
++    T *ptr = nullptr;
++    SccNodeObj *scc = nullptr;
++    IndexType dfsIndex = 0;
++    std::set<NodeObj *> edgeTargets;
++  };
++
++  struct SccNodeObj {
++    std::set<NodeObj *> nodes;
++    std::set<SccNodeObj *> edgeTargets;
++  };
++
++protected:
++  std::map<T *, std::unique_ptr<NodeObj>> nodes;
++  std::vector<NodeObj *> stack;
++  IndexType nextDfsIndex = 1;
++
++  NodeObj *getOrCreateNode(T *ptr) {
++    auto it = nodes.find(ptr);
++    if (it != nodes.end())
++      return (*it).second.get();
++    auto objPtr = std::make_unique<NodeObj>();
++    objPtr->ptr = ptr;
++    NodeObj *res = objPtr.get();
++    nodes[ptr] = std::move(objPtr);
++    return res;
++  }
++
++  IndexType strongConnect(NodeObj *node) {
++    node->dfsIndex = nextDfsIndex;
++    IndexType lowLink = nextDfsIndex;
++    ++nextDfsIndex;
++    stack.push_back(node);
++
++    for (NodeObj *target : node->edgeTargets) {
++      if (target->dfsIndex == 0) {
++        auto targetLowLink = strongConnect(target);
++        lowLink = std::min(lowLink, targetLowLink);
++      } else if (std::end(stack) !=
++                 std::find(std::begin(stack), std::end(stack), target)) {
++        lowLink = std::min(lowLink, target->dfsIndex);
++      }
++    }
++
++    if (lowLink == node->dfsIndex) {
++      // Create a new SCC with all the elements that are below the current
++      // node on the stack.
++      sCCs.resize(sCCs.size() + 1);
++      SccNodeObj &scc = sCCs.back();
++      NodeObj *element;
++      do {
++        element = stack.back();
++        stack.pop_back();
++        element->scc = &scc;
++        scc.nodes.insert(element);
++        // Determine the edges between SCCs (generates a DAG).
++        for (NodeObj *target : element->edgeTargets)
++          if (target->scc != nullptr && target->scc != element->scc)
++            scc.edgeTargets.insert(target->scc);
++      } while (element != node);
++    }
++    return lowLink;
++  }
++
++public:
++  SccAnalysis(const EdgesType &edgeVector) {
++
++    // Determine which nodes are in the graph based on the edges.
++    for (auto &&edge : edgeVector) {
++      NodeObj *first = getOrCreateNode(edge.first);
++      NodeObj *second = getOrCreateNode(edge.second);
++      first->edgeTargets.insert(second);
++    }
++
++    sCCs.reserve(nodes.size());
++    for (auto &&nodePair : nodes) {
++      NodeObj *node = nodePair.second.get();
++      if (node->dfsIndex == 0)
++        strongConnect(node);
++    }
++  }
++  ~SccAnalysis(){};
++};
++
++} // namespace
++
++namespace llvm {
++namespace json {
++
++bool fromJSON(const Value &e, MappingInfoRoot &info) {
++  ObjectMapper o(e);
++  if (!o || !o.map("functions", info.functions))
++    return false;
++  o.map("addresses_taken", info.addresses_taken);
++  return true;
++}
++
++bool fromJSON(const Value &e, MappingInfo &info) {
++  ObjectMapper o(e);
++  if (!o || !o.map("name", info.name) || !o.map("type", info.type))
++    return false;
++  o.map("call_targets", info.callTargets);
++  o.map("indirect_call_types", info.indirectCallTypes);
++  o.map("referenced_functions", info.referencedFunctions);
++  o.map("syscall_numbers", info.syscallNumbers);
++  return true;
++}
++
++Value toJSON(const MappingInfo &info) {
++  Object res{{"name", info.name}, {"type", info.type}};
++  if (info.callTargets.size())
++    res["call_targets"] = info.callTargets;
++  if (info.indirectCallTypes.size())
++    res["indirect_call_types"] = info.indirectCallTypes;
++  if (info.referencedFunctions.size())
++    res["referenced_functions"] = info.referencedFunctions;
++  if (info.syscallNumbers.size())
++    res["syscall_numbers"] = info.syscallNumbers;
++  return res;
++}
++
++Value toJSON(const FunctionMapping &mapping) {
++  Array functions, addresses;
++  for (const MappingInfo &info : mapping.getFunctions()) {
++    // if (info.is_interesting())
++    functions.push_back(toJSON(info));
++    if (mapping.has_address_taken(&info))
++      addresses.push_back(info.name);
++  }
++  return Object{{"addresses_taken", std::move(addresses)},
++                {"functions", std::move(functions)}};
++}
++
++} // namespace json
++} // namespace llvm
++
++/// Propagate the callhierarchy information along the direct call edges.
++///
++/// After this propagation step all direct call relationships should be
++/// resolved and every MappingInfo entry carries the accumulated information
++/// of directly callable functions.
++void propagateDirectCalls(FunctionMapping &mapping) {
++  bool verbose = errorHandler().verbose;
++  // Extract the call graph from the call edges, determine the strongly coupled
++  // components (SCCs) to transform it into a directed acyclic graph (DAG), and
++  // make the SCC DAG iterable in post-order.
++  SccAnalysis<MappingInfo>::EdgesType callEdges;
++  for (MappingInfo &info : mapping.getFunctions()) {
++    for (auto It = info.callTargets.begin(); It != info.callTargets.end();) {
++      MappingInfo *target = mapping.find(info.file, *It);
++      if (!target) {
++        if (verbose)
++          lld::errs() << "[WARN] " << info.file->getName() << ": " << info.name
++                      << ": no mapping found for targetName = " << *It << "\n";
++        It = info.callTargets.erase(It);
++        continue;
++      }
++      if (target->type == "") {
++        if (verbose)
++          lld::errs() << "[WARN] " << info.file->getName() << ": " << info.name
++                      << ": targetName = " << *It << " is incomplete \n";
++        It = info.callTargets.erase(It);
++        continue;
++      }
++
++      // drop uninteresting mappings immediately to speedup SCC construction
++      if (!target->is_interesting()) {
++        It = info.callTargets.erase(It);
++        continue;
++      }
++      callEdges.push_back(SccAnalysis<MappingInfo>::EdgeType{&info, target});
++      ++It;
++    }
++  }
++  SccAnalysis<MappingInfo> analysis(callEdges);
++
++  // Flatten the call graph by updating the MappingInfo.
++  std::vector<MappingInfo> sccInfos;
++  sccInfos.resize(analysis.sCCs.size());
++  for (SccAnalysis<MappingInfo>::SccNodeObj &scc : analysis.sCCs) {
++    size_t sccIndex =
++        std::distance(std::begin(analysis.sCCs),
++                      SccAnalysis<MappingInfo>::SccVecType::iterator(&scc));
++    MappingInfo &sccInfo = sccInfos[sccIndex];
++
++    // Accumulate the mapping info within the SCC.
++    for (SccAnalysis<MappingInfo>::NodeObj *node : scc.nodes) {
++      sccInfo.merge_into(*node->ptr);
++    }
++
++    // Remove the calls between nodes within the SCC.
++    for (SccAnalysis<MappingInfo>::NodeObj *node : scc.nodes) {
++      sccInfo.callTargets.erase(std::remove(std::begin(sccInfo.callTargets),
++                                            std::end(sccInfo.callTargets),
++                                            node->ptr->name),
++                                std::end(sccInfo.callTargets));
++    }
++
++    // Update the Info for each SCC.
++    for (SccAnalysis<MappingInfo>::SccNodeObj *targetScc : scc.edgeTargets) {
++      for (SccAnalysis<MappingInfo>::NodeObj *targetNode : targetScc->nodes)
++        sccInfo.callTargets.erase(std::remove(std::begin(sccInfo.callTargets),
++                                              std::end(sccInfo.callTargets),
++                                              targetNode->ptr->name),
++                                  std::end(sccInfo.callTargets));
++
++      size_t targetSccIndex = std::distance(
++          std::begin(analysis.sCCs),
++          SccAnalysis<MappingInfo>::SccVecType::iterator(targetScc));
++      assert(targetSccIndex < SccIndex);
++      sccInfo.merge_into(sccInfos[targetSccIndex]);
++    }
++
++    // Backpropagate the SCC info into its nodes.
++    for (SccAnalysis<MappingInfo>::NodeObj *node : scc.nodes) {
++      node->ptr->callTargets = sccInfo.callTargets;
++      node->ptr->indirectCallTypes = sccInfo.indirectCallTypes;
++      node->ptr->referencedFunctions = sccInfo.referencedFunctions;
++      node->ptr->syscallNumbers = sccInfo.syscallNumbers;
++    }
++  }
++}
++
++void propagateIndirectCalls(FunctionMapping &mapping) {
++  // bool verbose = errorHandler().verbose;
++
++  // Build a mapping from types to indirect callable functions.
++  DenseMap<StringRef, DenseSet<MappingInfo *>> indCallable;
++  for (MappingInfo &func : mapping.getFunctions())
++    if (mapping.has_address_taken(&func))
++      indCallable[func.type].insert(&func);
++
++  // Extract the call graph from the call edges, determine the strongly
++  // coupled components (SCCs) to transform it into a directed acyclic graph
++  // (DAG), and make the SCC DAG iterable in post-order.
++  SccAnalysis<MappingInfo>::EdgesType callEdges;
++  for (MappingInfo &info : mapping.getFunctions()) {
++    for (auto &&calltype : info.indirectCallTypes) {
++      auto it = indCallable.find(calltype);
++      if (it == indCallable.end()) {
++        // if (verbose)
++        //   lld::errs() << "[WARN] " << info.name
++        //               << ": Indirect call to unknown function signature: "
++        //               << calltype << "\n";
++        continue;
++      }
++      for (auto &&target : it->second)
++        if (target->is_interesting())
++          callEdges.push_back(
++              SccAnalysis<MappingInfo>::EdgeType{&info, target});
++    }
++  }
++  SccAnalysis<MappingInfo> analysis(callEdges);
++
++  // Flatten the call graph by updating the MappingInfo.
++  std::vector<MappingInfo> sccInfos;
++  sccInfos.resize(analysis.sCCs.size());
++  for (SccAnalysis<MappingInfo>::SccNodeObj &scc : analysis.sCCs) {
++    size_t sccIndex =
++        std::distance(std::begin(analysis.sCCs),
++                      SccAnalysis<MappingInfo>::SccVecType::iterator(&scc));
++    MappingInfo &sccInfo = sccInfos[sccIndex];
++
++    // Accumulate the mapping info within the SCC.
++    for (SccAnalysis<MappingInfo>::NodeObj *node : scc.nodes)
++      sccInfo.merge_into(*node->ptr);
++
++    // Remove the calls between nodes within the SCC.
++    for (SccAnalysis<MappingInfo>::NodeObj *node : scc.nodes) {
++      sccInfo.indirectCallTypes.erase(
++          std::remove(std::begin(sccInfo.indirectCallTypes),
++                      std::end(sccInfo.indirectCallTypes), node->ptr->type),
++          std::end(sccInfo.indirectCallTypes));
++    }
++
++    // Update the Info for each SCC.
++    for (SccAnalysis<MappingInfo>::SccNodeObj *targetScc : scc.edgeTargets) {
++      for (SccAnalysis<MappingInfo>::NodeObj *targetNode : targetScc->nodes)
++        sccInfo.indirectCallTypes.erase(
++            std::remove(std::begin(sccInfo.indirectCallTypes),
++                        std::end(sccInfo.indirectCallTypes),
++                        targetNode->ptr->type),
++            std::end(sccInfo.indirectCallTypes));
++
++      size_t targetSccIndex = std::distance(
++          std::begin(analysis.sCCs),
++          SccAnalysis<MappingInfo>::SccVecType::iterator(targetScc));
++      assert(TargetSccIndex < SccIndex);
++      sccInfo.merge_into(sccInfos[targetSccIndex]);
++    }
++
++    // warn(" SCC " + std::to_string(sccIndex) + ":");
++    // for (auto &&name : sccInfo.callTargets)
++    //   warn("    -> " + name);
++    // for (auto &&name : sccInfo.indirectCallTypes)
++    //   warn("    -> " + name);
++    // for (auto &&name : sccInfo.referencedFunctions)
++    //   warn("     & " + name);
++    // for (SccAnalysis<MappingInfo>::NodeObj *Node : scc.nodes) {
++    //   warn((Node->ptr->defined ? "  * " : "  * [external] ") +
++    //   Node->ptr->name +
++    //        ": " + Node->ptr->type);
++    //   for (auto &&name : Node->ptr->callTargets)
++    //     warn("    -> " + name);
++    //   for (auto &&name : Node->ptr->indirectCallTypes)
++    //     warn("    -> " + name);
++    //   for (auto &&name : Node->ptr->referencedFunctions)
++    //     warn("     & " + name);
++    // }
++
++    // Backpropagate the SCC info into its nodes.
++    for (SccAnalysis<MappingInfo>::NodeObj *node : scc.nodes) {
++      node->ptr->callTargets = sccInfo.callTargets;
++      node->ptr->indirectCallTypes = sccInfo.indirectCallTypes;
++      node->ptr->referencedFunctions = sccInfo.referencedFunctions;
++      node->ptr->syscallNumbers = sccInfo.syscallNumbers;
++    }
++  }
++}
++
++/// Extract all needed syscall numbers for embedding in the final executable.
++///
++/// We only use syscalls from functions that can be reached from main and
++/// exit. exit is required as this is the function that terminates the program
++/// but is not reachable from main as it is not directly called from it.
++std::set<unsigned> extractSyscalls(FunctionMapping &mapping) {
++  std::set<unsigned> syscalls;
++
++  MappingInfo *main = mapping.find_global("main");
++  if (main)
++    syscalls.insert(main->syscallNumbers.begin(), main->syscallNumbers.end());
++
++  MappingInfo *exit = mapping.find_global("exit");
++  if (exit)
++    syscalls.insert(exit->syscallNumbers.begin(), exit->syscallNumbers.end());
++  return syscalls;
++}
++
++template <class ELFT> void elf::combineCallHierarchyInfo() {
++  FunctionMapping mapping;
++
++  for (InputFile *file : objectFiles)
++    mapping.create_mappings(file);
++
++  // Extract the MappingInfo from all .note.callhierarchy input sections.
++  for (InputSectionBase *s : inputSections) {
++    if (!s->name.startswith(".note.callhierarchy"))
++      continue;
++
++    auto data = s->data();
++
++    llvm::Error err = Error::success();
++    auto i = typename ELFT::NoteIterator(data.data(), data.size(), err);
++    auto e = typename ELFT::NoteIterator();
++    s->markDead();
++    for (; i != e; ++i) {
++      if (err) {
++        warn("Iterating ELF notes failed!");
++        break;
++      }
++      typename ELFT::Note note = *i;
++      if (note.getName() != "NOTE" || note.getType() != 0x400) {
++        s->markLive();
++        continue;
++      }
++
++      // Just scan the sections and discard them if they only contain the NOTE
++      // callhierachy information.
++      if (!config->embedCallhierarchy)
++        continue;
++
++      // Parse the callhierarchy information and map the JSON values into
++      // MappingInfoRoot structures.
++      Expected<json::Value> value =
++          json::parse((const char *)note.getDesc().data());
++      if (!value) {
++        warn("Parsing the callhierarchy from the ELF note description "
++             "failed.");
++        continue;
++      }
++      MappingInfoRoot root;
++      if (!json::fromJSON(*value, root)) {
++        warn("Mapping the callhierarchy information failed.");
++        continue;
++      }
++
++      // Insert the parsed information into the mapping object.
++      for (auto &&entry : root.functions) {
++        entry.file = s->file;
++        mapping.add_function(s->file, entry);
++      }
++      for (auto &&name : root.addresses_taken)
++        mapping.add_address_taken(s->file, name);
++    }
++  }
++
++  // Abort here and let the linker remove the note sections that have been
++  // marked as dead.
++  if (!config->embedCallhierarchy)
++    return;
++
++  // helper to format a string with syscall numbers
++  auto get_syscall_string = [](auto mapping) -> auto {
++    std::stringstream ss;
++    for (auto numbers : extractSyscalls(mapping))
++      ss << numbers << " ";
++    return ss.str();
++  };
++
++  propagateDirectCalls(mapping);
++  propagateIndirectCalls(mapping);
++
++  if (!config->isStatic) {
++    inputSections.push_back(
++        make<NoteSection>(".note.callhierarchy", 0x401, "NOTE",
++                          formatv("{0}", json::toJSON(mapping)).str()));
++  } else {
++    inputSections.push_back(make<NoteSection>(".note.syscalls", 0x402, "NOTE",
++                                              get_syscall_string(mapping)));
++  }
++}
++
++template void elf::combineCallHierarchyInfo<ELF32LE>();
++template void elf::combineCallHierarchyInfo<ELF32BE>();
++template void elf::combineCallHierarchyInfo<ELF64LE>();
++template void elf::combineCallHierarchyInfo<ELF64BE>();
+diff --git a/lld/ELF/CallHierarchy.h b/lld/ELF/CallHierarchy.h
+new file mode 100644
+index 00000000000..6a1a0a43762
+--- /dev/null
++++ b/lld/ELF/CallHierarchy.h
+@@ -0,0 +1,20 @@
++//===- CallHierarchy.h ------------------------------------------*- C++ -*-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLD_ELF_CALL_HIERARCHY_H
++#define LLD_ELF_CALL_HIERARCHY_H
++
++namespace lld {
++namespace elf {
++
++template <class ELFT> void combineCallHierarchyInfo();
++
++} // namespace elf
++} // namespace lld
++
++#endif
+diff --git a/lld/ELF/Config.h b/lld/ELF/Config.h
+index ef1edbcd199..23db696f286 100644
+--- a/lld/ELF/Config.h
++++ b/lld/ELF/Config.h
+@@ -145,6 +145,7 @@ struct Configuration {
+   bool dependentLibraries;
+   bool disableVerify;
+   bool ehFrameHdr;
++  bool embedCallhierarchy;
+   bool emitLLVM;
+   bool emitRelocs;
+   bool enableNewDtags;
+diff --git a/lld/ELF/Driver.cpp b/lld/ELF/Driver.cpp
+index 25330832339..a87946ecf82 100644
+--- a/lld/ELF/Driver.cpp
++++ b/lld/ELF/Driver.cpp
+@@ -23,6 +23,7 @@
+ //===----------------------------------------------------------------------===//
+ 
+ #include "Driver.h"
++#include "CallHierarchy.h"
+ #include "Config.h"
+ #include "ICF.h"
+ #include "InputFiles.h"
+@@ -866,6 +867,8 @@ static void readConfigs(opt::InputArgList &args) {
+   config->dynamicLinker = getDynamicLinker(args);
+   config->ehFrameHdr =
+       args.hasFlag(OPT_eh_frame_hdr, OPT_no_eh_frame_hdr, false);
++  config->embedCallhierarchy =
++      args.hasFlag(OPT_fembed_callhierarchy, OPT_no_fembed_callhierarchy, false);
+   config->emitLLVM = args.hasArg(OPT_plugin_opt_emit_llvm, false);
+   config->emitRelocs = args.hasArg(OPT_emit_relocs);
+   config->callGraphProfileSort = args.hasFlag(
+@@ -1969,6 +1972,9 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
+   // processSectionCommands() so that they can be placed by SECTIONS commands.
+   createSyntheticSections<ELFT>();
+ 
++  // Combine the call hierarchy notes into a single note.
++  combineCallHierarchyInfo<ELFT>();
++
+   // Some input sections that are used for exception handling need to be moved
+   // into synthetic sections. Do that now so that they aren't assigned to
+   // output sections in the usual way.
+diff --git a/lld/ELF/InputFiles.cpp b/lld/ELF/InputFiles.cpp
+index 43978cd66c6..968804bb2f4 100644
+--- a/lld/ELF/InputFiles.cpp
++++ b/lld/ELF/InputFiles.cpp
+@@ -982,7 +982,7 @@ InputSectionBase *ObjFile<ELFT>::createInputSection(const Elf_Shdr &sec) {
+     return &InputSection::discarded;
+   }
+ 
+-  // An object file cmpiled for split stack, but where some of the
++  // An object file compiled for split stack, but where some of the
+   // functions were compiled with the no_split_stack_attribute will
+   // include a .note.GNU-no-split-stack section.
+   if (name == ".note.GNU-no-split-stack") {
+diff --git a/lld/ELF/Options.td b/lld/ELF/Options.td
+index ea78a352621..e0f586bb9f2 100644
+--- a/lld/ELF/Options.td
++++ b/lld/ELF/Options.td
+@@ -166,6 +166,11 @@ defm fatal_warnings: B<"fatal-warnings",
+     "Treat warnings as errors",
+     "Do not treat warnings as errors (default)">;
+ 
++def fembed_callhierarchy: Flag<["--", "-"], "fembed-callhierarchy">,
++    HelpText<"Embed callhierarchy information as note into the binary.">;
++def no_fembed_callhierarchy: Flag<["--", "-"], "fno-embed-callhierarchy">,
++    HelpText<"Omit callhierarchy information in input section notes. (default)">;
++
+ defm filter: Eq<"filter", "Set DT_FILTER field to the specified name">;
+ 
+ defm fini: Eq<"fini", "Specify a finalizer function">, MetaVarName<"<symbol>">;
+diff --git a/lld/ELF/SyntheticSections.cpp b/lld/ELF/SyntheticSections.cpp
+index ea6eab4b47a..53a593a96ed 100644
+--- a/lld/ELF/SyntheticSections.cpp
++++ b/lld/ELF/SyntheticSections.cpp
+@@ -331,6 +331,22 @@ void BuildIdSection::writeTo(uint8_t *buf) {
+   hashBuf = buf + 16;
+ }
+ 
++NoteSection::NoteSection(StringRef sectionName, uint32_t noteType,
++                         StringRef noteName, StringRef noteDescription)
++    : SyntheticSection(SHF_ALLOC, SHT_NOTE, 4, sectionName), type{noteType},
++      name{noteName}, description{noteDescription} {}
++
++void NoteSection::writeTo(uint8_t *buf) {
++  size_t descStart = 3 * 4 + llvm::alignTo(name.length() + 1, 4);
++
++  write32(buf, name.length() + 1);                  // Name size
++  write32(buf + 4, description.length() + 1);       // Content size
++  write32(buf + 8, type);                           // Type
++  memcpy(buf + 12, name.data(), name.length() + 1); // Name string
++  memcpy(buf + descStart, description.data(),
++         description.length() + 1);                 // Description string
++}
++
+ void BuildIdSection::writeBuildId(ArrayRef<uint8_t> buf) {
+   assert(buf.size() == hashSize);
+   memcpy(hashBuf, buf.data(), hashSize);
+diff --git a/lld/ELF/SyntheticSections.h b/lld/ELF/SyntheticSections.h
+index 5f59178fb54..4e6ae7579d2 100644
+--- a/lld/ELF/SyntheticSections.h
++++ b/lld/ELF/SyntheticSections.h
+@@ -26,6 +26,7 @@
+ #include "llvm/ADT/MapVector.h"
+ #include "llvm/MC/StringTableBuilder.h"
+ #include "llvm/Support/Endian.h"
++#include "llvm/Support/MathExtras.h"
+ #include <functional>
+ 
+ namespace lld {
+@@ -174,6 +175,33 @@ private:
+   uint8_t *hashBuf;
+ };
+ 
++// .note section with a single note entry.
++//
++// An ELF note entry corresponds to the following structure:
++//
++//     struct Note {
++//         uint32_t n_namesz;             // length of the name incl. binary 0
++//         uint32_t n_descsz;             // length of the description incl. 0
++//         uint32_t n_type = 0xdeadbeef;  // arbitrary positive integer
++//         _Alignas(4) uint8_t name[n_namesz] = "NameString"
++//         _Alignas(4) uint8_t description[n_descsz] = "DescriptionString"
++//     };
++//
++class NoteSection : public SyntheticSection {
++  uint32_t type;
++  std::string name;
++  std::string description;
++
++public:
++  NoteSection(StringRef sectionName, uint32_t noteType, StringRef noteName,
++              StringRef noteDescription);
++  void writeTo(uint8_t *buf) override;
++  size_t getSize() const override {
++    return 3 * 4 + llvm::alignTo(name.length() + 1, 4) +
++           llvm::alignTo(description.length() + 1, 4);
++  }
++};
++
+ // BssSection is used to reserve space for copy relocations and common symbols.
+ // We create three instances of this class for .bss, .bss.rel.ro and "COMMON",
+ // that are used for writable symbols, read-only symbols and common symbols,
+diff --git a/llvm/include/llvm/Analysis/CGSCCPassManager.h b/llvm/include/llvm/Analysis/CGSCCPassManager.h
+index 933f2210daf..bcba0939054 100644
+--- a/llvm/include/llvm/Analysis/CGSCCPassManager.h
++++ b/llvm/include/llvm/Analysis/CGSCCPassManager.h
+@@ -19,7 +19,7 @@
+ ///
+ /// A secondary more general goal is to be able to isolate optimization on
+ /// unrelated parts of the IR module. This is useful to ensure our
+-/// optimizations are principled and don't miss oportunities where refinement
++/// optimizations are principled and don't miss opportunities where refinement
+ /// of one part of the module influence transformations in another part of the
+ /// module. But this is also useful if we want to parallelize the optimizations
+ /// across common large module graph shapes which tend to be very wide and have
+@@ -215,7 +215,7 @@ using ModuleAnalysisManagerCGSCCProxy =
+                               LazyCallGraph &>;
+ 
+ /// Support structure for SCC passes to communicate updates the call graph back
+-/// to the CGSCC pass manager infrsatructure.
++/// to the CGSCC pass manager infrastructure.
+ ///
+ /// The CGSCC pass manager runs SCC passes which are allowed to update the call
+ /// graph and SCC structures. This means the structure the pass manager works
+diff --git a/llvm/include/llvm/Analysis/CallHierarchyAnalysis.h b/llvm/include/llvm/Analysis/CallHierarchyAnalysis.h
+new file mode 100644
+index 00000000000..04c8f6867b7
+--- /dev/null
++++ b/llvm/include/llvm/Analysis/CallHierarchyAnalysis.h
+@@ -0,0 +1,93 @@
++//===- CallHierarchyAnalysis.h ----------------------------------*- C++ -*-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++/// \file
++///
++/// Implements a call hierarchy analysis which reports an over approximation of
++/// external functions that can be called via the different entry points.
++///
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_ANALYSIS_CALLHIERARCHYANALYSIS_H
++#define LLVM_ANALYSIS_CALLHIERARCHYANALYSIS_H
++
++#include "llvm/ADT/DenseMap.h"
++#include "llvm/ADT/SetVector.h"
++#include "llvm/ADT/SmallVector.h"
++#include "llvm/IR/Function.h"
++#include "llvm/IR/Module.h"
++#include "llvm/IR/PassManager.h"
++#include "llvm/Support/JSON.h"
++
++#include <string>
++
++namespace llvm {
++
++class CallHierarchy {
++public:
++  struct ReachabilityResult {
++    SmallSetVector<const GlobalValue *, 16> CallTargets;
++    SmallSetVector<const FunctionType *, 4> IndirectCallTypes;
++    SmallSetVector<const GlobalValue *, 8> ReferencedFunctions;
++    SmallSetVector<unsigned, 256> SyscallNumbers;
++
++    bool isInteresting() const {
++      return CallTargets.size() || IndirectCallTypes.size() ||
++             ReferencedFunctions.size() || SyscallNumbers.size();
++    }
++  };
++
++  SmallSetVector<const GlobalValue *, 8> HasAddressTaken;
++  DenseMap<const GlobalValue *, ReachabilityResult> FunctionMapping;
++
++  CallHierarchy(Module &M);
++  CallHierarchy(CallHierarchy &&G);
++  ~CallHierarchy();
++
++  bool isExtern(const GlobalValue *) const;
++  const FunctionType *getType(const GlobalValue *) const;
++
++  void addReferences(Value *Op, SmallSetVector<const GlobalValue *, 8> &refs);
++  void addReferences(Value *Op, SmallSetVector<const GlobalValue *, 8> &refs,
++                     SmallSetVector<const Value *, 8> &visited);
++};
++
++/// An analysis pass which computes the call hierarchy for a module.
++class CallHierarchyAnalysis : public AnalysisInfoMixin<CallHierarchyAnalysis> {
++  friend AnalysisInfoMixin<CallHierarchyAnalysis>;
++
++  static AnalysisKey Key;
++
++public:
++  /// Inform generic clients of the result type.
++  using Result = CallHierarchy;
++
++  /// Compute the \c CallHierarchy for the module \c M.
++  CallHierarchy run(Module &M, ModuleAnalysisManager &) {
++    return CallHierarchy(M);
++  }
++};
++
++/// A pass which prints the call hierarchy to a \c raw_ostream.
++///
++/// This is primarily useful for testing the analysis.
++class CallHierarchyPrinterPass
++    : public PassInfoMixin<CallHierarchyPrinterPass> {
++  raw_ostream &OS;
++
++public:
++  explicit CallHierarchyPrinterPass(raw_ostream &OS);
++
++  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
++};
++
++namespace json {
++Value toJSON(const CallHierarchy &Analysis);
++} // namespace json
++} // namespace llvm
++
++#endif // LLVM_ANALYSIS_CALLHIERARCHYANALYSIS_H
+diff --git a/llvm/include/llvm/Analysis/LazyCallGraph.h b/llvm/include/llvm/Analysis/LazyCallGraph.h
+index 20a35bef189..ff24a6f0abc 100644
+--- a/llvm/include/llvm/Analysis/LazyCallGraph.h
++++ b/llvm/include/llvm/Analysis/LazyCallGraph.h
+@@ -146,7 +146,7 @@ public:
+     /// around but clear them.
+     explicit operator bool() const;
+ 
+-    /// Returnss the \c Kind of the edge.
++    /// Returns the \c Kind of the edge.
+     Kind getKind() const;
+ 
+     /// Test whether the edge represents a direct call to a function.
+@@ -380,6 +380,9 @@ public:
+       return populateSlow();
+     }
+ 
++  /// Stores signatures for indirectly called functions.
++  SmallPtrSet<FunctionType *, 4> IndirectCallSignatures;
++
+   private:
+     LazyCallGraph *G;
+     Function *F;
+@@ -401,12 +404,15 @@ public:
+ 
+     /// Internal helper to directly replace the function with a new one.
+     ///
+-    /// This is used to facilitate tranfsormations which need to replace the
++    /// This is used to facilitate transformations which need to replace the
+     /// formal Function object but directly move the body and users from one to
+     /// the other.
+     void replaceFunction(Function &NewF);
+ 
+-    void clear() { Edges.reset(); }
++    void clear() {
++      Edges.reset();
++      IndirectCallSignatures.clear();
++    }
+ 
+     /// Print the name of this node's function.
+     friend raw_ostream &operator<<(raw_ostream &OS, const Node &N) {
+@@ -444,7 +450,7 @@ public:
+       Nodes.clear();
+     }
+ 
+-    /// Print a short descrtiption useful for debugging or logging.
++    /// Print a short description useful for debugging or logging.
+     ///
+     /// We print the function names in the SCC wrapped in '()'s and skipping
+     /// the middle functions if there are a large number.
+@@ -932,7 +938,8 @@ public:
+   /// No function definitions are scanned until their nodes in the graph are
+   /// requested during traversal.
+   LazyCallGraph(Module &M,
+-                function_ref<TargetLibraryInfo &(Function &)> GetTLI);
++                function_ref<TargetLibraryInfo &(Function &)> GetTLI,
++                bool SkipDecls = true);
+ 
+   LazyCallGraph(LazyCallGraph &&G);
+   LazyCallGraph &operator=(LazyCallGraph &&RHS);
+@@ -1131,6 +1138,10 @@ private:
+   /// escape at the module scope.
+   EdgeSequence EntryEdges;
+ 
++  /// Config flag that selects if calls to functions that are only declared
++  /// but not defined should be omitted from the call graph edges.
++  bool SkipDeclarations;
++
+   /// Allocator that holds all the call graph SCCs.
+   SpecificBumpPtrAllocator<SCC> SCCBPA;
+ 
+diff --git a/llvm/include/llvm/InitializePasses.h b/llvm/include/llvm/InitializePasses.h
+index a5e1310e28b..258840422e3 100644
+--- a/llvm/include/llvm/InitializePasses.h
++++ b/llvm/include/llvm/InitializePasses.h
+@@ -101,6 +101,7 @@ void initializeCallGraphDOTPrinterPass(PassRegistry&);
+ void initializeCallGraphPrinterLegacyPassPass(PassRegistry&);
+ void initializeCallGraphViewerPass(PassRegistry&);
+ void initializeCallGraphWrapperPassPass(PassRegistry&);
++void initializeCallHierarchyPrinterLegacyPassPass(PassRegistry&);
+ void initializeCallSiteSplittingLegacyPassPass(PassRegistry&);
+ void initializeCalledValuePropagationLegacyPassPass(PassRegistry &);
+ void initializeCodeGenPreparePass(PassRegistry&);
+diff --git a/llvm/include/llvm/Object/ELFTypes.h b/llvm/include/llvm/Object/ELFTypes.h
+index 7d1ade4d543..9b5512585e4 100644
+--- a/llvm/include/llvm/Object/ELFTypes.h
++++ b/llvm/include/llvm/Object/ELFTypes.h
+@@ -661,6 +661,7 @@ class Elf_Note_Iterator_Impl
+     }
+   }
+ 
++public:
+   Elf_Note_Iterator_Impl() {}
+   explicit Elf_Note_Iterator_Impl(Error &Err) : Err(&Err) {}
+   Elf_Note_Iterator_Impl(const uint8_t *Start, size_t Size, Error &Err)
+@@ -670,7 +671,6 @@ class Elf_Note_Iterator_Impl
+     advanceNhdr(Start, 0u);
+   }
+ 
+-public:
+   Elf_Note_Iterator_Impl &operator++() {
+     assert(Nhdr && "incremented ELF note end iterator");
+     const uint8_t *NhdrPos = reinterpret_cast<const uint8_t *>(Nhdr);
+diff --git a/llvm/include/llvm/Transforms/Instrumentation/AddressSanitizer.h b/llvm/include/llvm/Transforms/Instrumentation/AddressSanitizer.h
+index 40007a9b8c5..fe23ca4bca0 100644
+--- a/llvm/include/llvm/Transforms/Instrumentation/AddressSanitizer.h
++++ b/llvm/include/llvm/Transforms/Instrumentation/AddressSanitizer.h
+@@ -113,7 +113,7 @@ private:
+ /// to check for various memory errors.
+ ///
+ /// This adds 'asan.module_ctor' to 'llvm.global_ctors'. This pass may also
+-/// run intependently of the function address sanitizer.
++/// run independently of the function address sanitizer.
+ class ModuleAddressSanitizerPass
+     : public PassInfoMixin<ModuleAddressSanitizerPass> {
+ public:
+diff --git a/llvm/include/llvm/Transforms/Instrumentation/CallHierarchy.h b/llvm/include/llvm/Transforms/Instrumentation/CallHierarchy.h
+new file mode 100644
+index 00000000000..2b33b7d384e
+--- /dev/null
++++ b/llvm/include/llvm/Transforms/Instrumentation/CallHierarchy.h
+@@ -0,0 +1,31 @@
++//===----------- Definition of the CallHierarchy class ----------*- C++ -*-===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file is distributed under the University of Illinois Open Source
++// License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// This file declares the CallHierarchy class which embeds the result of the
++// CallHierarchyAnalysis into the translation unit as ELF note.
++//
++//===----------------------------------------------------------------------===//
++#ifndef LLVM_TRANSFORMS_INSTRUMENTATION_CALLHIERARCHY_H
++#define LLVM_TRANSFORMS_INSTRUMENTATION_CALLHIERARCHY_H
++
++#include "llvm/IR/PassManager.h"
++
++namespace llvm {
++
++class CallHierarchyPass
++    : public PassInfoMixin<CallHierarchyPass> {
++public:
++  explicit CallHierarchyPass();
++
++  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
++};
++
++} // namespace llvm
++
++#endif
+diff --git a/llvm/include/llvm/Transforms/Utils/LowerMemIntrinsics.h b/llvm/include/llvm/Transforms/Utils/LowerMemIntrinsics.h
+index 8e9d7b522c7..d5ce6d74632 100644
+--- a/llvm/include/llvm/Transforms/Utils/LowerMemIntrinsics.h
++++ b/llvm/include/llvm/Transforms/Utils/LowerMemIntrinsics.h
+@@ -25,7 +25,7 @@ class TargetTransformInfo;
+ class Value;
+ 
+ /// Emit a loop implementing the semantics of llvm.memcpy where the size is not
+-/// a compile-time constant. Loop will be insterted at \p InsertBefore.
++/// a compile-time constant. Loop will be inserted at \p InsertBefore.
+ void createMemCpyLoopUnknownSize(Instruction *InsertBefore, Value *SrcAddr,
+                                  Value *DstAddr, Value *CopyLen,
+                                  unsigned SrcAlign, unsigned DestAlign,
+diff --git a/llvm/lib/Analysis/Analysis.cpp b/llvm/lib/Analysis/Analysis.cpp
+index af718526684..1373b40687e 100644
+--- a/llvm/lib/Analysis/Analysis.cpp
++++ b/llvm/lib/Analysis/Analysis.cpp
+@@ -28,6 +28,7 @@ void llvm::initializeAnalysis(PassRegistry &Registry) {
+   initializeCallGraphDOTPrinterPass(Registry);
+   initializeCallGraphPrinterLegacyPassPass(Registry);
+   initializeCallGraphViewerPass(Registry);
++  initializeCallHierarchyPrinterLegacyPassPass(Registry);
+   initializeCostModelAnalysisPass(Registry);
+   initializeCFGViewerLegacyPassPass(Registry);
+   initializeCFGPrinterLegacyPassPass(Registry);
+diff --git a/llvm/lib/Analysis/CMakeLists.txt b/llvm/lib/Analysis/CMakeLists.txt
+index cc9ff0bc1f5..cf3850edcd4 100644
+--- a/llvm/lib/Analysis/CMakeLists.txt
++++ b/llvm/lib/Analysis/CMakeLists.txt
+@@ -16,6 +16,7 @@ add_llvm_component_library(LLVMAnalysis
+   CGSCCPassManager.cpp
+   CallGraph.cpp
+   CallGraphSCCPass.cpp
++  CallHierarchyAnalysis.cpp
+   CallPrinter.cpp
+   CaptureTracking.cpp
+   CmpInstAnalysis.cpp
+diff --git a/llvm/lib/Analysis/CallHierarchyAnalysis.cpp b/llvm/lib/Analysis/CallHierarchyAnalysis.cpp
+new file mode 100644
+index 00000000000..643d4892420
+--- /dev/null
++++ b/llvm/lib/Analysis/CallHierarchyAnalysis.cpp
+@@ -0,0 +1,350 @@
++//===- CallHierarchyAnalysis.cpp - ----------------------------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#include "llvm/Analysis/CallHierarchyAnalysis.h"
++
++#include "llvm/IR/CallSite.h"
++#include "llvm/IR/Constants.h"
++#include "llvm/IR/InlineAsm.h"
++#include "llvm/IR/TypeFinder.h"
++#include "llvm/InitializePasses.h"
++#include "llvm/Pass.h"
++#include "llvm/PassSupport.h"
++
++using namespace llvm;
++
++CallHierarchy::CallHierarchy(Module &M) {
++  // Construct a mapping for all functions and aliases that are of interest.
++  for (Function &F : M) {
++    if (F.getName().startswith("llvm.")) // ignore llvm intrinsics
++      continue;
++    FunctionMapping[&F];
++  }
++  for (GlobalAlias &GA : M.aliases()) {
++    Function *Func = dyn_cast<Function>(GA.getAliasee());
++    if (Func)
++      FunctionMapping[&GA];
++  }
++
++  // Traverse these functions and extract their call information.
++  for (auto &Entry : FunctionMapping) {
++    auto F = dyn_cast<Function>(const_cast<GlobalValue *>(Entry.first));
++    if (!F || F->isDeclaration())
++      continue;
++
++    auto &res = Entry.second;
++    for (BasicBlock &BB : *F) {
++      for (Instruction &I : BB) {
++        auto CS = CallSite(&I);
++        if (!CS) {
++          // Not a call, iterate over instruction operands to find references to
++          // functions.
++          for (Value *Op : I.operand_values())
++            addReferences(Op, res.ReferencedFunctions);
++          continue;
++        }
++
++        // Call, iterate over call arguments to find references to functions.
++        for (Value *Op : CS.args())
++          addReferences(Op, res.ReferencedFunctions);
++
++        // Handle aliases by treating them as regular functions when they
++        // are not interposable and as opaque aliases otherwise.
++        auto GA = dyn_cast<GlobalAlias>(CS.getCalledValue());
++        if (GA && FunctionMapping.count(GA))
++          res.CallTargets.insert(GA);
++
++        // Special case for syscall and __syscall_cp. Check if current
++        // CallSite is such a call and extract the first argument.
++        Function *Func = CS.getCalledFunction();
++        if (Func && !CS.arg_empty() &&
++            (Func->getName() == "__syscall_cp" ||
++             Func->getName() == "syscall")) {
++          auto arg = dyn_cast<ConstantInt>(CS.arg_begin());
++          if (arg)
++            res.SyscallNumbers.insert(arg->getZExtValue());
++        } // Track functions that are directly called.
++        else if (Func && FunctionMapping.count(Func))
++          res.CallTargets.insert(Func);
++
++        // Track signatures of functions that are indirectly called.
++        if (CS.isIndirectCall()) {
++          auto PT = cast<PointerType>(CS.getCalledValue()->getType());
++          res.IndirectCallTypes.insert(
++              cast<FunctionType>(PT->getElementType()));
++        }
++
++        // Check if it is inline assembly and has arguments. If it is we
++        // ensure that it is a syscall and that a constant integer is used
++        // as argument.
++        if (CS.isInlineAsm() && !CS.arg_empty()) {
++          CallBase *CB = dyn_cast<CallBase>(CS.getInstruction());
++          InlineAsm *in_asm = dyn_cast<InlineAsm>(CB->getCalledOperand());
++          // Architecture-specifc part: on x86 we need to find the syscall
++          // instruction, on arm svc 0 or svc #0
++          if (in_asm->getAsmString() == "syscall" ||
++              strstr(in_asm->getAsmString().c_str(), "svc 0") != 0 ||
++              strstr(in_asm->getAsmString().c_str(), "svc #0") != 0) {
++            ConstantInt *arg = dyn_cast<ConstantInt>(CS.arg_begin());
++            if (arg)
++              res.SyscallNumbers.insert(arg->getZExtValue());
++            else
++              errs() << "Couldn't cast syscall first parameter to "
++                        "ConstantInt\n";
++          }
++        }
++      }
++    }
++  }
++
++  // Iterate over the global initializers to find references to functions.
++  for (GlobalVariable &GV : M.globals())
++    if (GV.hasInitializer())
++      addReferences(GV.getInitializer(), HasAddressTaken);
++
++  // Aliases to internal functions get a copy of the analysis results and
++  // aliases to external functions are modeled as calling the function.
++  for (GlobalAlias &GA : M.aliases()) {
++    Function *Func = dyn_cast<Function>(GA.getAliasee());
++    if (!Func)
++      continue;
++
++    if (Func->hasLocalLinkage())
++      FunctionMapping[&GA] = FunctionMapping[Func];
++    else
++      FunctionMapping[&GA].CallTargets.insert(Func);
++  }
++}
++
++CallHierarchy::CallHierarchy(CallHierarchy &&G)
++    : HasAddressTaken(std::move(G.HasAddressTaken)),
++      FunctionMapping(std::move(G.FunctionMapping)) {}
++
++CallHierarchy::~CallHierarchy() {}
++
++bool CallHierarchy::isExtern(const GlobalValue *GV) const {
++  auto F = dyn_cast<Function>(GV);
++  if (F)
++    return F->isDeclaration();
++  return dyn_cast<GlobalAlias>(GV) == nullptr;
++}
++
++const FunctionType *CallHierarchy::getType(const GlobalValue *GV) const {
++  auto F = dyn_cast<Function>(GV);
++  if (F)
++    return F->getFunctionType();
++
++  auto GA = dyn_cast<GlobalAlias>(GV);
++  return dyn_cast<Function>(GA->getAliasee())->getFunctionType();
++}
++
++void CallHierarchy::addReferences(
++    Value *Op, SmallSetVector<const GlobalValue *, 8> &referencedFunctions) {
++  SmallSetVector<const Value *, 8> visited;
++  addReferences(Op, referencedFunctions, visited);
++}
++
++void CallHierarchy::addReferences(
++    Value *Op, SmallSetVector<const GlobalValue *, 8> &referencedFunctions,
++    SmallSetVector<const Value *, 8> &visited) {
++  Constant *C = dyn_cast<Constant>(Op);
++  if (!C || !visited.insert(Op))
++    return;
++
++  auto GV = dyn_cast<GlobalValue>(C);
++  if (GV && FunctionMapping.count(GV)) {
++    auto F = dyn_cast<Function>(GV);
++    if (F)
++      referencedFunctions.insert(F);
++    else
++      referencedFunctions.insert(dyn_cast<GlobalAlias>(GV));
++    return;
++  }
++
++  // Recurse into nested constants.
++  for (Value *Op : C->operand_values())
++    addReferences(Op, referencedFunctions, visited);
++}
++
++AnalysisKey CallHierarchyAnalysis::Key;
++
++namespace {
++
++std::string dump_function_type(const FunctionType *Type) {
++  std::string TypeStr;
++  llvm::raw_string_ostream Strm(TypeStr);
++  Type->print(Strm);
++  Strm.flush();
++  return TypeStr;
++}
++
++void printMetadata(raw_ostream &OS, const GlobalValue *GV,
++                   const CallHierarchy &CH) {
++  OS << GV->getName();
++  if (GV->isDeclaration())
++    OS << ", declaration";
++  OS << ", linkage = " << GV->getLinkage() << ", ";
++  CH.getType(GV)->print(OS);
++  OS << "\n";
++}
++
++void printCallHierarchy(raw_ostream &OS, const Module &M,
++                        const CallHierarchy &CH) {
++  OS << "Printing the call graph for module: " << M.getModuleIdentifier()
++     << "\n";
++
++  OS << "  External Functions:\n";
++  for (auto Entry : CH.FunctionMapping) {
++    const GlobalValue *GV = Entry.first;
++    if (!CH.isExtern(GV))
++      continue;
++    OS << "  * ";
++    printMetadata(OS, GV, CH);
++  }
++  OS << "\n";
++
++  OS << "  Address Taken:\n";
++  for (const GlobalValue *GV : CH.HasAddressTaken) {
++    OS << "  * ";
++    printMetadata(OS, GV, CH);
++  }
++  OS << "\n";
++
++  OS << "  Call Graph:\n";
++  for (auto Entry : CH.FunctionMapping) {
++    const GlobalValue *GV = Entry.first;
++    const CallHierarchy::ReachabilityResult &res = Entry.second;
++    if (CH.isExtern(GV))
++      continue;
++    OS << "  * ";
++    printMetadata(OS, GV, CH);
++    if (res.SyscallNumbers.size()) {
++      OS << "      Syscalls:";
++      for (auto Number : res.SyscallNumbers) {
++        OS << " " << Number;
++      }
++      OS << "\n";
++    }
++    if (res.CallTargets.size() || res.IndirectCallTypes.size()) {
++      OS << "      Calls:\n";
++      for (const GlobalValue *T : res.CallTargets)
++        OS << "      -> " << T->getName() << "\n";
++      for (const FunctionType *Type : res.IndirectCallTypes) {
++        OS << "      -> ";
++        Type->print(OS);
++        OS << "\n";
++      }
++    }
++    if (res.ReferencedFunctions.size()) {
++      OS << "      References:\n";
++      for (const GlobalValue *T : res.ReferencedFunctions)
++        OS << "       & " << T->getName() << "\n";
++    }
++    OS << "\n";
++  }
++}
++
++} // end anonymous namespace
++
++namespace llvm {
++namespace json {
++
++Value toJSON(const CallHierarchy &Analysis) {
++  // Include an analysis result into the json only when it not contains any
++  // relevant data.
++  const bool InterestingOnly = true;
++
++  Array mappings;
++  for (auto &&Entry : Analysis.FunctionMapping) {
++    const GlobalValue *GV = Entry.first;
++    const CallHierarchy::ReachabilityResult &res = Entry.second;
++    if (Analysis.isExtern(GV) || (InterestingOnly && !res.isInteresting()))
++      continue;
++
++    Object Res{{"name", GV->getName()},
++               {"type", dump_function_type(Analysis.getType(GV))}};
++
++    if (res.CallTargets.size()) {
++      Array jsonArray;
++      for (const auto *T : res.CallTargets)
++        jsonArray.push_back(T->getName());
++      Res["call_targets"] = std::move(jsonArray);
++    }
++
++    if (res.IndirectCallTypes.size()) {
++      Array jsonArray;
++      for (const FunctionType *Type : res.IndirectCallTypes)
++        jsonArray.push_back(dump_function_type(Type));
++      Res["indirect_call_types"] = std::move(jsonArray);
++    }
++
++    if (res.ReferencedFunctions.size()) {
++      Array jsonArray;
++      for (const auto *T : res.ReferencedFunctions)
++        jsonArray.push_back(T->getName());
++      Res["referenced_functions"] = std::move(jsonArray);
++    }
++
++    if (res.SyscallNumbers.size()) {
++      Array jsonArray;
++      for (auto number : res.SyscallNumbers)
++        jsonArray.push_back(number);
++      Res["syscall_numbers"] = std::move(jsonArray);
++    }
++
++    mappings.push_back(std::move(Res));
++  }
++  Array addresses;
++  for (auto address : Analysis.HasAddressTaken) {
++    addresses.push_back(address->getName());
++  }
++  Object root{{"addresses_taken", std::move(addresses)},
++              {"functions", std::move(mappings)}};
++  return root;
++}
++
++} // namespace json
++} // namespace llvm
++
++CallHierarchyPrinterPass::CallHierarchyPrinterPass(raw_ostream &OS) : OS(OS) {}
++
++PreservedAnalyses CallHierarchyPrinterPass::run(Module &M,
++                                                ModuleAnalysisManager &AM) {
++  CallHierarchy &CH = AM.getResult<CallHierarchyAnalysis>(M);
++  printCallHierarchy(OS, M, CH);
++  return PreservedAnalyses::all();
++}
++
++namespace {
++
++struct CallHierarchyPrinterLegacyPass : public ModulePass {
++  static char ID; // Pass ID, replacement for typeid
++
++  CallHierarchyPrinterLegacyPass() : ModulePass(ID) {
++    initializeCallGraphPrinterLegacyPassPass(*PassRegistry::getPassRegistry());
++  }
++
++  void getAnalysisUsage(AnalysisUsage &AU) const override {
++    AU.setPreservesAll();
++  }
++
++  bool runOnModule(Module &M) override {
++    CallHierarchy CH(M);
++
++    auto &OS = errs();
++    printCallHierarchy(OS, M, CH);
++    return false;
++  }
++};
++
++} // end anonymous namespace
++
++char CallHierarchyPrinterLegacyPass::ID = 0;
++
++INITIALIZE_PASS(CallHierarchyPrinterLegacyPass, "print-call-hierarchy",
++                "Print a call hierarchy", true, true)
+diff --git a/llvm/lib/Analysis/LazyCallGraph.cpp b/llvm/lib/Analysis/LazyCallGraph.cpp
+index ef31c1e0ba8..f7311b86622 100644
+--- a/llvm/lib/Analysis/LazyCallGraph.cpp
++++ b/llvm/lib/Analysis/LazyCallGraph.cpp
+@@ -99,14 +99,21 @@ LazyCallGraph::EdgeSequence &LazyCallGraph::Node::populateSlow() {
+   // safety of optimizing a direct call edge.
+   for (BasicBlock &BB : *F)
+     for (Instruction &I : BB) {
+-      if (auto CS = CallSite(&I))
+-        if (Function *Callee = CS.getCalledFunction())
+-          if (!Callee->isDeclaration())
++      if (auto CS = CallSite(&I)) {
++        if (Function *Callee = CS.getCalledFunction()) {
++          if (!G->SkipDeclarations || !Callee->isDeclaration())
+             if (Callees.insert(Callee).second) {
+               Visited.insert(Callee);
+               addEdge(Edges->Edges, Edges->EdgeIndexMap, G->get(*Callee),
+                       LazyCallGraph::Edge::Call);
+             }
++        } else {
++          // Track the signatures of the functions that are indirectly called.
++          PointerType* PT = cast<PointerType>(CS.getCalledValue()->getType());
++          FunctionType* FT = cast<FunctionType>(PT->getElementType());
++          IndirectCallSignatures.insert(FT);
++        }
++      }
+ 
+       for (Value *Op : I.operand_values())
+         if (Constant *C = dyn_cast<Constant>(Op))
+@@ -150,8 +157,9 @@ static bool isKnownLibFunction(Function &F, TargetLibraryInfo &TLI) {
+   return TLI.getLibFunc(F, LF) || TLI.isFunctionVectorizable(F.getName());
+ }
+ 
+-LazyCallGraph::LazyCallGraph(
+-    Module &M, function_ref<TargetLibraryInfo &(Function &)> GetTLI) {
++LazyCallGraph::LazyCallGraph(Module &M,
++  function_ref<TargetLibraryInfo &(Function &)> GetTLI, bool SkipDecls)
++    : SkipDeclarations(SkipDecls) {
+   LLVM_DEBUG(dbgs() << "Building CG for module: " << M.getModuleIdentifier()
+                     << "\n");
+   for (Function &F : M) {
+@@ -205,7 +213,8 @@ LazyCallGraph::LazyCallGraph(
+ 
+ LazyCallGraph::LazyCallGraph(LazyCallGraph &&G)
+     : BPA(std::move(G.BPA)), NodeMap(std::move(G.NodeMap)),
+-      EntryEdges(std::move(G.EntryEdges)), SCCBPA(std::move(G.SCCBPA)),
++      EntryEdges(std::move(G.EntryEdges)), SkipDeclarations(G.SkipDeclarations),
++      SCCBPA(std::move(G.SCCBPA)),
+       SCCMap(std::move(G.SCCMap)),
+       LibFunctions(std::move(G.LibFunctions)) {
+   updateGraphPtrs();
+@@ -215,6 +224,7 @@ LazyCallGraph &LazyCallGraph::operator=(LazyCallGraph &&G) {
+   BPA = std::move(G.BPA);
+   NodeMap = std::move(G.NodeMap);
+   EntryEdges = std::move(G.EntryEdges);
++  SkipDeclarations = G.SkipDeclarations;
+   SCCBPA = std::move(G.SCCBPA);
+   SCCMap = std::move(G.SCCMap);
+   LibFunctions = std::move(G.LibFunctions);
+@@ -394,7 +404,7 @@ bool LazyCallGraph::RefSCC::isAncestorOf(const RefSCC &RC) const {
+ /// cycle-introducing edge insertion.
+ ///
+ /// A postorder sequence of SCCs of a directed graph has one fundamental
+-/// property: all deges in the DAG of SCCs point "up" the sequence. That is,
++/// property: all edges in the DAG of SCCs point "up" the sequence. That is,
+ /// all edges in the SCC DAG point to prior SCCs in the sequence.
+ ///
+ /// This routine both updates a postorder sequence and uses that sequence to
+diff --git a/llvm/lib/Passes/PassBuilder.cpp b/llvm/lib/Passes/PassBuilder.cpp
+index 53b7db8689c..0be2a69550c 100644
+--- a/llvm/lib/Passes/PassBuilder.cpp
++++ b/llvm/lib/Passes/PassBuilder.cpp
+@@ -27,6 +27,7 @@
+ #include "llvm/Analysis/CFLSteensAliasAnalysis.h"
+ #include "llvm/Analysis/CGSCCPassManager.h"
+ #include "llvm/Analysis/CallGraph.h"
++#include "llvm/Analysis/CallHierarchyAnalysis.h"
+ #include "llvm/Analysis/DDG.h"
+ #include "llvm/Analysis/DemandedBits.h"
+ #include "llvm/Analysis/DependenceAnalysis.h"
+@@ -97,6 +98,7 @@
+ #include "llvm/Transforms/Instrumentation.h"
+ #include "llvm/Transforms/Instrumentation/AddressSanitizer.h"
+ #include "llvm/Transforms/Instrumentation/BoundsChecking.h"
++#include "llvm/Transforms/Instrumentation/CallHierarchy.h"
+ #include "llvm/Transforms/Instrumentation/CGProfile.h"
+ #include "llvm/Transforms/Instrumentation/ControlHeightReduction.h"
+ #include "llvm/Transforms/Instrumentation/GCOVProfiler.h"
+diff --git a/llvm/lib/Passes/PassRegistry.def b/llvm/lib/Passes/PassRegistry.def
+index 355dd6f9681..ade89ab52eb 100644
+--- a/llvm/lib/Passes/PassRegistry.def
++++ b/llvm/lib/Passes/PassRegistry.def
+@@ -7,7 +7,7 @@
+ //===----------------------------------------------------------------------===//
+ //
+ // This file is used as the registry of passes that are part of the core LLVM
+-// libraries. This file describes both transformation passes and analyses
++// libraries. This file describes both transformation passes and analyses.
+ // Analyses are registered while transformation passes have names registered
+ // that can be used when providing a textual pass pipeline.
+ //
+@@ -19,6 +19,7 @@
+ #define MODULE_ANALYSIS(NAME, CREATE_PASS)
+ #endif
+ MODULE_ANALYSIS("callgraph", CallGraphAnalysis())
++MODULE_ANALYSIS("callhierarchy", CallHierarchyAnalysis())
+ MODULE_ANALYSIS("lcg", LazyCallGraphAnalysis())
+ MODULE_ANALYSIS("module-summary", ModuleSummaryIndexAnalysis())
+ MODULE_ANALYSIS("no-op-module", NoOpModuleAnalysis())
+@@ -48,6 +49,7 @@ MODULE_PASS("constmerge", ConstantMergePass())
+ MODULE_PASS("cross-dso-cfi", CrossDSOCFIPass())
+ MODULE_PASS("deadargelim", DeadArgumentEliminationPass())
+ MODULE_PASS("elim-avail-extern", EliminateAvailableExternallyPass())
++MODULE_PASS("embed-callhierarchy", CallHierarchyPass())
+ MODULE_PASS("forceattrs", ForceFunctionAttrsPass())
+ MODULE_PASS("function-import", FunctionImportPass())
+ MODULE_PASS("globaldce", GlobalDCEPass())
+@@ -76,6 +78,7 @@ MODULE_PASS("print-profile-summary", ProfileSummaryPrinterPass(dbgs()))
+ MODULE_PASS("print-callgraph", CallGraphPrinterPass(dbgs()))
+ MODULE_PASS("print", PrintModulePass(dbgs()))
+ MODULE_PASS("print-lcg", LazyCallGraphPrinterPass(dbgs()))
++MODULE_PASS("print-callhierarchy", CallHierarchyPrinterPass(dbgs()))
+ MODULE_PASS("print-lcg-dot", LazyCallGraphDOTPrinterPass(dbgs()))
+ MODULE_PASS("print-stack-safety", StackSafetyGlobalPrinterPass(dbgs()))
+ MODULE_PASS("rewrite-statepoints-for-gc", RewriteStatepointsForGC())
+diff --git a/llvm/lib/Transforms/Instrumentation/CMakeLists.txt b/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
+index 9316de4eb32..f52ec2b10f7 100644
+--- a/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
++++ b/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
+@@ -1,6 +1,7 @@
+ add_llvm_component_library(LLVMInstrumentation
+   AddressSanitizer.cpp
+   BoundsChecking.cpp
++  CallHierarchy.cpp
+   CGProfile.cpp
+   ControlHeightReduction.cpp
+   DataFlowSanitizer.cpp
+diff --git a/llvm/lib/Transforms/Instrumentation/CallHierarchy.cpp b/llvm/lib/Transforms/Instrumentation/CallHierarchy.cpp
+new file mode 100644
+index 00000000000..7b6354fbd60
+--- /dev/null
++++ b/llvm/lib/Transforms/Instrumentation/CallHierarchy.cpp
+@@ -0,0 +1,80 @@
++#include "llvm/Transforms/Instrumentation/CallHierarchy.h"
++
++#include "llvm/Analysis/CallHierarchyAnalysis.h"
++#include "llvm/IR/Constants.h"
++#include "llvm/IR/DerivedTypes.h"
++#include "llvm/IR/Type.h"
++#include "llvm/Support/MathExtras.h"
++#include "llvm/Transforms/Utils/ModuleUtils.h"
++
++using namespace llvm;
++
++namespace {
++Constant *getAlignedStringConstant(LLVMContext &Context, StringRef Str,
++                                   uint64_t Alignment) {
++  SmallVector<uint8_t, 64> ElementVals;
++  ElementVals.append(Str.begin(), Str.end());
++  ElementVals.push_back(0);
++  uint64_t end = alignTo(Str.size() + 1, Alignment);
++  for (uint64_t i = Str.size() + 1; i < end; ++i)
++    ElementVals.push_back(0);
++  return ConstantDataArray::get(Context, ElementVals);
++}
++} // namespace
++
++CallHierarchyPass::CallHierarchyPass() {}
++
++PreservedAnalyses CallHierarchyPass::run(Module &M, ModuleAnalysisManager &AM) {
++  if (M.getFunctionList().empty())
++    return PreservedAnalyses::all();
++
++  CallHierarchy &CH = AM.getResult<CallHierarchyAnalysis>(M);
++
++  // serialize the analysis result as json
++  std::string JsonData = formatv("{0}", json::toJSON(CH)).str(); // 0:2
++  /* errs() << JsonData << "\n\n"; */
++
++  std::string Name = "NOTE";
++  uint64_t NoteType = 0x400;
++
++  LLVMContext &Ctx = M.getContext();
++  IntegerType *Int32 = Type::getInt32Ty(Ctx);
++
++  // Type definition and constant initialization for a note header.
++  StructType *ElfHdrType = StructType::get(Ctx, {Int32, Int32, Int32});
++
++  Constant *NameSzConstant =
++      ConstantInt::get(Ctx, APInt(32, Name.length() + 1));
++  Constant *DescSzConstant =
++      ConstantInt::get(Ctx, APInt(32, JsonData.length() + 1));
++  Constant *TypeConstant = ConstantInt::get(Ctx, APInt(32, NoteType));
++  Constant *ElfHdrConstant = ConstantStruct::get(ElfHdrType, NameSzConstant,
++                                                 DescSzConstant, TypeConstant);
++
++  // Type definitions for constant initializing a note entry.
++  Constant *NameConstant = getAlignedStringConstant(Ctx, Name, 4);
++  Constant *DescConstant = getAlignedStringConstant(Ctx, JsonData, 4);
++  /* errs() << "Test: "; */
++  /* DescConstant->print(errs(), false); */
++  /* errs() << "\n"; */
++
++  StructType *ElfNoteType = StructType::get(
++      Ctx, {ElfHdrType, NameConstant->getType(), DescConstant->getType()});
++  Constant *ElfNoteConstant = ConstantStruct::get(ElfNoteType, ElfHdrConstant,
++                                                  NameConstant, DescConstant);
++
++  // Create the note variable and mark it as used
++  GlobalVariable *NoteVariable =
++      new GlobalVariable(M,
++                         /*Type=*/ElfNoteType,
++                         /*isConstant=*/true,
++                         /*Linkage=*/GlobalValue::PrivateLinkage,
++                         /*Initializer=*/ElfNoteConstant,
++                         /*Name=*/"CallHierarchyNote");
++  NoteVariable->setAlignment(MaybeAlign(4));
++  NoteVariable->setSection(".note.callhierarchy");
++
++  appendToUsed(M, {NoteVariable});
++
++  return PreservedAnalyses::all();
++}
