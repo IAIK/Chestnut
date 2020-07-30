@@ -80,8 +80,11 @@ def find_syscall_locations(insn):
     syscalls = []
     for i in range(len(insn)):
         # find syscall
-        if capstone.x86.X86_GRP_INT in insn[i].groups and "syscall" in insn[i].mnemonic:
-            syscalls.append((i, insn[i].address))
+        try:
+            if capstone.x86.X86_GRP_INT in insn[i].groups and "syscall" in insn[i].mnemonic:
+                syscalls.append((i, insn[i].address))
+        except:
+            continue
     return syscalls
 
 
@@ -129,7 +132,6 @@ def get_blocked_syscalls(syscalls):
                 blocked.append(row[1])
     return blocked
 
-
 def init(fname):
     with open(fname, 'rb') as f:
         elf = ELFFile(f)
@@ -138,6 +140,8 @@ def init(fname):
         addr = code['sh_addr']
         md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
         md.detail = True
+        # set skip data otherwise capstone stops when it cannot disasm an instruction
+        md.skipdata = True
 
         # disassemble with meta information
         insn = []
@@ -163,21 +167,24 @@ def modify_elf(syscalls, fname):
     # extend all syscalls to length 3, create a list of each to split after each char
     # flatten list of lists. Launcher then can extract three consecutive bytes to
     # recreate syscall number
-    with open(fname + "_syscalls", "w") as f:
-        f.write(' '.join([str(x) for x in sorted(syscalls)]))
-    list_of_lists = [list(str(x).zfill(3)) for x in syscalls]
-    flattened_syscalls = [int(y) for x in list_of_lists for y in x]
-    note = lief.ELF.Note("NOTE", lief.ELF.NOTE_TYPES.UNKNOWN, flattened_syscalls)
-    note = binary.add(note)
-    new_binary = fname + "_modified"
-    # inject sandboxing library
-    # binary.add_library("libchestnut.so")
-    # add seccomp library as well
-    # binary.add_library("libseccomp.so.2")
-    binary.write(new_binary)
-    # with this we save ourselves the need to modify lief
-    # note does not have type 0x402 but standalone launcher ignores that value and simply looks for the name
-    subprocess.call(["objcopy --rename-section .note=.note.syscalls " + new_binary ], shell=True, stdout=DEVNULL, stderr=subprocess.STDOUT)
+    try:
+        with open(fname + "_syscalls", "w") as f:
+            f.write(' '.join([str(x) for x in sorted(syscalls)]))
+        list_of_lists = [list(str(x).zfill(3)) for x in syscalls]
+        flattened_syscalls = [int(y) for x in list_of_lists for y in x]
+        note = lief.ELF.Note("NOTE", lief.ELF.NOTE_TYPES.UNKNOWN, flattened_syscalls)
+        note = binary.add(note)
+        new_binary = fname + "_modified"
+        # inject sandboxing library
+        # binary.add_library("libchestnut.so")
+        # add seccomp library as well
+        # binary.add_library("libseccomp.so.2")
+        binary.write(new_binary)
+        # with this we save ourselves the need to modify lief
+        # note does not have type 0x402 but standalone launcher ignores that value and simply looks for the name
+        subprocess.call(["objcopy --rename-section .note=.note.syscalls " + new_binary ], shell=True, stdout=DEVNULL, stderr=subprocess.STDOUT)
+    except PermissionError:
+        pass
 
 
 def filter_file(fname):
@@ -211,9 +218,6 @@ def main(fnames):
             if wlib in fname:
                 all_syscalls |= set(whitelist[wlib])
         print("[+] Found %d syscalls for %s (%d in total)" % (len(syscalls), fname, len(all_syscalls)))
-        # create a modified elf file that contains the syscalls
-        modify_elf(syscalls, fname)
-
         
     all_blocked = get_blocked_syscalls(all_syscalls)    
     print("[!] Blocking %d syscalls" % len(all_blocked))
@@ -222,7 +226,8 @@ def main(fnames):
     
     with open("policy_%s" % filter_file(fnames[0]), "w") as ff:
         json.dump(policy.create(all_syscalls), ff)
-    
+    # create a modified elf file that contains the syscalls
+    modify_elf(all_syscalls, fnames[0])
     
 if __name__ == "__main__":
     if len(sys.argv) < 2:
