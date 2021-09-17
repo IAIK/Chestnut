@@ -4,7 +4,6 @@ import syscalls
 import json
 import time
 import logging
-import pprint as pp
 import os
 
 logging.getLogger('angr').setLevel('CRITICAL')
@@ -122,9 +121,6 @@ def get_cfg(fname):
     cfg = p.analyses.CFGFast(force_complete_scan=False, resolve_indirect_jumps=False, normalize=True, show_progressbar=True)
 
     return cfg
-
-
-import pprofile
 
 current = 0
 
