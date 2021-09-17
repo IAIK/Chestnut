@@ -1,4 +1,11 @@
 # Chestnut
+
+This is the PoC implementation for the CCSW'21 paper
+
+[Automating Seccomp Filter Generation for Linux Applications](http://cc0x1f.net/publications/chestnut.pdf) by Claudio Canella, Mario Werner, Daniel Gruss, and Michael Schwarz
+
+## Description
+
 Chestnut is a tool that automates sandboxing applications on the system-call level. The compiler extension Sourcealyzer is based on LLVM and statically detects system calls during compilation and linking. Binalyzer can be applied to existing binaries where the source code is not available. Dynalyzer detects system calls during runtime and includes a dynamic permission system that asks a user for confirmation whether the system call should be allowed.
 
 ## Prerequsites

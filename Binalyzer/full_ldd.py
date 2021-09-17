@@ -36,6 +36,7 @@ class ReadElf(object):
             for tag in section.iter_tags():
                 if tag.entry.d_tag == 'DT_NEEDED':
                     dt_needed.append(str(tag.needed))
+                    #sys.stdout.write('\t%s\n' % str(tag.needed) )
 
         return dt_needed
 
@@ -136,6 +137,18 @@ def get_dependencies(fname):
     for n, lib in all_dt_needed_paths.items():
         dep.append(lib)
     return dep
+
+def is_static(fname):
+    with open(fname, "rb") as f:
+        try:
+            elf = ELFFile(f)
+            for segment in elf.iter_segments():
+                if segment.header.p_type == "PT_DYNAMIC":
+                    return False
+        except ELFError as ex:
+            sys.stderr.write("Elf error: %s\n" % ex)
+            sys.exit(1)
+    return True
 
 
 def main():

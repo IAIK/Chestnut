@@ -1,6 +1,8 @@
 import sys
 import json
 import syscalls
+import os
+from cfg import cached_results_folder
 
 def filter_file(fname):
     f = fname.replace("/", "_") + ".json"
@@ -10,7 +12,7 @@ def filter_file(fname):
 
 def main(fname):
     used_syscalls = []
-    ffname = "syscalls_%s" % filter_file(fname)
+    ffname = os.path.join(cached_results_folder, "syscalls_%s" % filter_file(fname))
     try:
         with open(ffname, "r") as ff:
             used_syscalls = json.loads(ff.read())
@@ -31,10 +33,11 @@ def main(fname):
     rules.append("seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(execve), 0);")
     
     wrapper = open("secwrap.c", "r").read().replace("/* RULES */", "\n".join(rules))
-    with open("wrapper.c", "w") as o:
+    with open("modified_binaries/wrapper.c", "w") as o:
         o.write(wrapper)
         
-    print("[+] seccomp wrapper created!")    
+    print("[+] seccomp wrapper created!")
+    
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:

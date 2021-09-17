@@ -4,9 +4,12 @@ import syscalls
 import json
 import time
 import logging
-import pprofile
+import pprint as pp
+import os
 
 logging.getLogger('angr').setLevel('CRITICAL')
+
+cached_results_folder = "cached_results"
 
 callsite_cache = {}
 function_cache = {}
@@ -17,16 +20,17 @@ current_ms = lambda: int(round(time.time() * 1000))
 def build_function_cache(cfg):
     global function_cache
     print("Building function cache...")
-
+    
     for f in cfg.kb.functions:
         start = 2**63
         end = 0
         fnc = cfg.kb.functions[f]
         for block in fnc.blocks:
-            if block.size == 0: #skip blocks with size 0, they just mess up the function cache and are no real BBs.
+            if block.size == 0: #skip blocks with size 0
                 continue
             start = min(block.addr, start)
             end = max(block.addr + block.size, end)
+
         function_cache[fnc] = (start, end)
 
 def find_function(cfg, vaddr):
@@ -39,6 +43,7 @@ def find_function(cfg, vaddr):
 
     return None
 
+
 def function_calling_syscalls(cfg, sys_addrs):
     syslist = {}
     # map all syscall addresses to functions
@@ -46,11 +51,12 @@ def function_calling_syscalls(cfg, sys_addrs):
         fnc = find_function(cfg, sys_addr)
         if not fnc:
             continue
-
         if fnc not in syslist:
             syslist[fnc] = set()
         syslist[fnc].add(sys_addr)
+
     return syslist
+
 
 def get_call_sites(fnc):
     global callsite_cache
@@ -58,6 +64,7 @@ def get_call_sites(fnc):
     if fnc not in callsite_cache:
         callsite_cache[fnc] = fnc.get_call_sites()
     return callsite_cache[fnc]
+    
 
 def get_call_targets(cfg):
     callees = {}
@@ -78,9 +85,9 @@ def get_call_targets(cfg):
                     callees[fnc] = set()
                 callees[fnc].add(gf)
             else:
-                print("[!] Could not get function 0x%x, coming from 0x%x in %s" % (call[1], call[0], fnc.name))
-
+                continue
     return callees
+
 
 def get_syscalls(cfg, fnc, callees, syslist, found = set(), traversed = set()):
     if fnc in traversed:
@@ -93,6 +100,7 @@ def get_syscalls(cfg, fnc, callees, syslist, found = set(), traversed = set()):
         for c in callees[fnc]:
             found.update(get_syscalls(cfg, c, callees, syslist, found, traversed))
     return found
+
 
 def syscalls_per_function(cfg, callees, syslist):
     syscaller = {}
@@ -108,29 +116,34 @@ def syscalls_per_function(cfg, callees, syslist):
 
     return syscaller
 
+    
 def get_cfg(fname):
     p = angr.Project(fname, load_options={'auto_load_libs': False, 'main_opts': {'base_addr': 0}})
-    cfg = p.analyses.CFGFast(force_complete_scan=False, resolve_indirect_jumps=False, normalize=True)
+    cfg = p.analyses.CFGFast(force_complete_scan=False, resolve_indirect_jumps=False, normalize=True, show_progressbar=True)
+
     return cfg
 
+
+import pprofile
+
 current = 0
+
 def start_time():
     global current
     current = current_ms()
-
+    
 def stop_time(msg):
     global current
     delta = current_ms() - current
     print("[%dms] %s" % (delta, msg))
     current = current_ms()
 
-
 def extract_syscalls(fname):
-    profiler = pprofile.Profile()
     # clear the function cache if it is not empty, otherwise we get random syscalls based on the order of dependencies being processed
     if(len(function_cache) > 0):
         print("Clearing function cache")
         function_cache.clear()
+        callsite_cache.clear()
 
     start_time()
     try:
@@ -153,14 +166,14 @@ def extract_syscalls(fname):
 
     syscaller = syscalls_per_function(cfg, callees, syslist)
     stop_time("Extract syscalls per function")
-
+    
     whitelist = {}
     try:
-        with open("function_whitelist.json") as wl:
+        with open("whitelists/function_whitelist.json") as wl:
             whitelist = json.loads(wl.read())
     except:
         pass
-
+    
     insn_to_syscall = {}
     used_syscalls = {}
     for fnc in syscaller:
@@ -184,11 +197,15 @@ def extract_syscalls(fname):
 
     return used_syscalls
 
+
 def main():
     used_syscalls = extract_syscalls(sys.argv[1])
+    os.makedirs(cached_results_folder, exist_ok=True)
 
-    with open("cfg.json", "w") as out:
+    with open(os.path.join(cached_results_folder, "cfg.json"), "w") as out:
         json.dump(used_syscalls, out, sort_keys=True, indent=4, separators=(',', ': '))
+
+
 
 if __name__ == "__main__":
     main()
