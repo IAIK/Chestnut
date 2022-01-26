@@ -1,5 +1,5 @@
 diff --git a/clang/CMakeLists.txt b/clang/CMakeLists.txt
-index 781c3eb7f2f..4eccb22d4c2 100644
+index dc1413f4b..fba0af04c 100644
 --- a/clang/CMakeLists.txt
 +++ b/clang/CMakeLists.txt
 @@ -226,7 +226,7 @@ set(C_INCLUDE_DIRS "" CACHE STRING
@@ -12,7 +12,7 @@ index 781c3eb7f2f..4eccb22d4c2 100644
  
  set(ENABLE_LINKER_BUILD_ID OFF CACHE BOOL "pass --build-id to ld")
 diff --git a/clang/include/clang/Basic/CodeGenOptions.def b/clang/include/clang/Basic/CodeGenOptions.def
-index 1ecae98b13b..877a4f8baec 100644
+index 1ecae98b1..877a4f8ba 100644
 --- a/clang/include/clang/Basic/CodeGenOptions.def
 +++ b/clang/include/clang/Basic/CodeGenOptions.def
 @@ -385,6 +385,9 @@ CODEGENOPT(BranchTargetEnforcement, 1, 0)
@@ -26,7 +26,7 @@ index 1ecae98b13b..877a4f8baec 100644
  #undef ENUM_CODEGENOPT
  #undef VALUE_CODEGENOPT
 diff --git a/clang/include/clang/Driver/Options.td b/clang/include/clang/Driver/Options.td
-index 0a60873443f..d49f58ec9e2 100644
+index 391c895a4..5150a767a 100644
 --- a/clang/include/clang/Driver/Options.td
 +++ b/clang/include/clang/Driver/Options.td
 @@ -1235,6 +1235,14 @@ def fexperimental_isel : Flag<["-"], "fexperimental-isel">, Group<f_clang_Group>
@@ -45,7 +45,7 @@ index 0a60873443f..d49f58ec9e2 100644
  def fexec_charset_EQ : Joined<["-"], "fexec-charset=">, Group<f_Group>;
  def finstrument_functions : Flag<["-"], "finstrument-functions">, Group<f_Group>, Flags<[CC1Option]>,
 diff --git a/clang/lib/CodeGen/BackendUtil.cpp b/clang/lib/CodeGen/BackendUtil.cpp
-index 0bfcab88a3a..b4738ac878a 100644
+index 0bfcab88a..b4738ac87 100644
 --- a/clang/lib/CodeGen/BackendUtil.cpp
 +++ b/clang/lib/CodeGen/BackendUtil.cpp
 @@ -57,6 +57,7 @@
@@ -67,7 +67,7 @@ index 0bfcab88a3a..b4738ac878a 100644
  
    // FIXME: We still use the legacy pass manager to do code generation. We
 diff --git a/clang/lib/Driver/Driver.cpp b/clang/lib/Driver/Driver.cpp
-index fb8335a3695..56c9ea76ac7 100644
+index fb8335a36..56c9ea76a 100644
 --- a/clang/lib/Driver/Driver.cpp
 +++ b/clang/lib/Driver/Driver.cpp
 @@ -131,6 +131,16 @@ Driver::Driver(StringRef ClangExecutable, StringRef TargetTriple,
@@ -103,7 +103,7 @@ index fb8335a3695..56c9ea76ac7 100644
      SysRoot = A->getValue();
    if (const Arg *A = Args.getLastArg(options::OPT__dyld_prefix_EQ))
 diff --git a/clang/lib/Driver/ToolChain.cpp b/clang/lib/Driver/ToolChain.cpp
-index cab97b1a601..75c632d9afe 100644
+index 18400d9de..87c021784 100644
 --- a/clang/lib/Driver/ToolChain.cpp
 +++ b/clang/lib/Driver/ToolChain.cpp
 @@ -895,6 +895,7 @@ void ToolChain::AddCXXStdlibLibArgs(const ArgList &Args,
@@ -115,7 +115,7 @@ index cab97b1a601..75c632d9afe 100644
  
    case ToolChain::CST_Libstdcxx:
 diff --git a/clang/lib/Driver/ToolChains/Clang.cpp b/clang/lib/Driver/ToolChains/Clang.cpp
-index fa025be14e4..f8c8134e61e 100644
+index fa025be14..f8c8134e6 100644
 --- a/clang/lib/Driver/ToolChains/Clang.cpp
 +++ b/clang/lib/Driver/ToolChains/Clang.cpp
 @@ -5454,6 +5454,14 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
@@ -134,10 +134,10 @@ index fa025be14e4..f8c8134e61e 100644
    RenderObjCOptions(TC, D, RawTriple, Args, Runtime, rewriteKind != RK_None,
                      Input, CmdArgs);
 diff --git a/clang/lib/Driver/ToolChains/Gnu.cpp b/clang/lib/Driver/ToolChains/Gnu.cpp
-index da197e47662..f0d60f9fb06 100644
+index e8ef881e8..5a2112223 100644
 --- a/clang/lib/Driver/ToolChains/Gnu.cpp
 +++ b/clang/lib/Driver/ToolChains/Gnu.cpp
-@@ -453,6 +453,14 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -455,6 +455,14 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
      }
    }
  
@@ -152,20 +152,20 @@ index da197e47662..f0d60f9fb06 100644
    CmdArgs.push_back("-o");
    CmdArgs.push_back(Output.getFilename());
  
-@@ -475,6 +483,12 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -477,6 +485,12 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
        CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crti.o")));
      }
  
-+    // Add the sandboxing object to executables when autosandboxing is enabled.
++    // Add the chestnut object to executables when autosandboxing is enabled.
 +    if (Args.hasArg(options::OPT_fautosandbox) &&
 +        !Args.hasArg(options::OPT_shared))
 +      CmdArgs.push_back(
-+          Args.MakeArgString(ToolChain.GetFilePath("sandboxing.o")));
++          Args.MakeArgString(ToolChain.GetFilePath("chestnut.o")));
 +
      if (IsIAMCU)
        CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crt0.o")));
      else if (HasCRTBeginEndFiles) {
-@@ -594,6 +608,11 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+@@ -596,6 +610,11 @@ void tools::gnutools::Linker::ConstructJob(Compilation &C, const JobAction &JA,
          CmdArgs.push_back("-lsoftfp");
          CmdArgs.push_back("--no-as-needed");
        }
@@ -177,7 +177,7 @@ index da197e47662..f0d60f9fb06 100644
      }
  
      if (!Args.hasArg(options::OPT_nostartfiles) && !IsIAMCU) {
-@@ -2714,6 +2733,8 @@ Generic_GCC::addLibCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+@@ -2716,6 +2735,8 @@ Generic_GCC::addLibCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
      addSystemInclude(DriverArgs, CC1Args, IncludePath);
      return true;
    };
@@ -187,7 +187,7 @@ index da197e47662..f0d60f9fb06 100644
    // which are generally incompatible with the NDK libraries anyway.
    if (!getTriple().isAndroid())
 diff --git a/clang/lib/Frontend/CompilerInvocation.cpp b/clang/lib/Frontend/CompilerInvocation.cpp
-index e98a407ac42..003f7d5b7d2 100644
+index e98a407ac..003f7d5b7 100644
 --- a/clang/lib/Frontend/CompilerInvocation.cpp
 +++ b/clang/lib/Frontend/CompilerInvocation.cpp
 @@ -769,6 +769,7 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
@@ -199,7 +199,7 @@ index e98a407ac42..003f7d5b7d2 100644
    Opts.ForceDwarfFrameSection =
        Args.hasFlag(OPT_fforce_dwarf_frame, OPT_fno_force_dwarf_frame, false);
 diff --git a/lld/ELF/CMakeLists.txt b/lld/ELF/CMakeLists.txt
-index b89f4436288..a9da207db6f 100644
+index b89f44362..a9da207db 100644
 --- a/lld/ELF/CMakeLists.txt
 +++ b/lld/ELF/CMakeLists.txt
 @@ -24,6 +24,7 @@ add_lld_library(lldELF
@@ -212,7 +212,7 @@ index b89f4436288..a9da207db6f 100644
    DriverUtils.cpp
 diff --git a/lld/ELF/CallHierarchy.cpp b/lld/ELF/CallHierarchy.cpp
 new file mode 100644
-index 00000000000..706599b338a
+index 000000000..382666485
 --- /dev/null
 +++ b/lld/ELF/CallHierarchy.cpp
 @@ -0,0 +1,663 @@
@@ -662,7 +662,7 @@ index 00000000000..706599b338a
 +      size_t targetSccIndex = std::distance(
 +          std::begin(analysis.sCCs),
 +          SccAnalysis<MappingInfo>::SccVecType::iterator(targetScc));
-+      assert(targetSccIndex < SccIndex);
++      // assert(targetSccIndex < SccIndex);
 +      sccInfo.merge_into(sccInfos[targetSccIndex]);
 +    }
 +
@@ -740,7 +740,7 @@ index 00000000000..706599b338a
 +      size_t targetSccIndex = std::distance(
 +          std::begin(analysis.sCCs),
 +          SccAnalysis<MappingInfo>::SccVecType::iterator(targetScc));
-+      assert(TargetSccIndex < SccIndex);
++      // assert(TargetSccIndex < SccIndex);
 +      sccInfo.merge_into(sccInfos[targetSccIndex]);
 +    }
 +
@@ -881,7 +881,7 @@ index 00000000000..706599b338a
 +template void elf::combineCallHierarchyInfo<ELF64BE>();
 diff --git a/lld/ELF/CallHierarchy.h b/lld/ELF/CallHierarchy.h
 new file mode 100644
-index 00000000000..6a1a0a43762
+index 000000000..6a1a0a437
 --- /dev/null
 +++ b/lld/ELF/CallHierarchy.h
 @@ -0,0 +1,20 @@
@@ -906,7 +906,7 @@ index 00000000000..6a1a0a43762
 +
 +#endif
 diff --git a/lld/ELF/Config.h b/lld/ELF/Config.h
-index ef1edbcd199..23db696f286 100644
+index ef1edbcd1..23db696f2 100644
 --- a/lld/ELF/Config.h
 +++ b/lld/ELF/Config.h
 @@ -145,6 +145,7 @@ struct Configuration {
@@ -918,7 +918,7 @@ index ef1edbcd199..23db696f286 100644
    bool emitRelocs;
    bool enableNewDtags;
 diff --git a/lld/ELF/Driver.cpp b/lld/ELF/Driver.cpp
-index 25330832339..a87946ecf82 100644
+index 6de9698bb..7d06373c2 100644
 --- a/lld/ELF/Driver.cpp
 +++ b/lld/ELF/Driver.cpp
 @@ -23,6 +23,7 @@
@@ -938,7 +938,7 @@ index 25330832339..a87946ecf82 100644
    config->emitLLVM = args.hasArg(OPT_plugin_opt_emit_llvm, false);
    config->emitRelocs = args.hasArg(OPT_emit_relocs);
    config->callGraphProfileSort = args.hasFlag(
-@@ -1969,6 +1972,9 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
+@@ -1978,6 +1981,9 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &args) {
    // processSectionCommands() so that they can be placed by SECTIONS commands.
    createSyntheticSections<ELFT>();
  
@@ -949,7 +949,7 @@ index 25330832339..a87946ecf82 100644
    // into synthetic sections. Do that now so that they aren't assigned to
    // output sections in the usual way.
 diff --git a/lld/ELF/InputFiles.cpp b/lld/ELF/InputFiles.cpp
-index 43978cd66c6..968804bb2f4 100644
+index 43978cd66..968804bb2 100644
 --- a/lld/ELF/InputFiles.cpp
 +++ b/lld/ELF/InputFiles.cpp
 @@ -982,7 +982,7 @@ InputSectionBase *ObjFile<ELFT>::createInputSection(const Elf_Shdr &sec) {
@@ -962,7 +962,7 @@ index 43978cd66c6..968804bb2f4 100644
    // include a .note.GNU-no-split-stack section.
    if (name == ".note.GNU-no-split-stack") {
 diff --git a/lld/ELF/Options.td b/lld/ELF/Options.td
-index ea78a352621..e0f586bb9f2 100644
+index ea78a3526..e0f586bb9 100644
 --- a/lld/ELF/Options.td
 +++ b/lld/ELF/Options.td
 @@ -166,6 +166,11 @@ defm fatal_warnings: B<"fatal-warnings",
@@ -978,7 +978,7 @@ index ea78a352621..e0f586bb9f2 100644
  
  defm fini: Eq<"fini", "Specify a finalizer function">, MetaVarName<"<symbol>">;
 diff --git a/lld/ELF/SyntheticSections.cpp b/lld/ELF/SyntheticSections.cpp
-index ea6eab4b47a..53a593a96ed 100644
+index ea6eab4b4..53a593a96 100644
 --- a/lld/ELF/SyntheticSections.cpp
 +++ b/lld/ELF/SyntheticSections.cpp
 @@ -331,6 +331,22 @@ void BuildIdSection::writeTo(uint8_t *buf) {
@@ -1005,7 +1005,7 @@ index ea6eab4b47a..53a593a96ed 100644
    assert(buf.size() == hashSize);
    memcpy(hashBuf, buf.data(), hashSize);
 diff --git a/lld/ELF/SyntheticSections.h b/lld/ELF/SyntheticSections.h
-index 5f59178fb54..4e6ae7579d2 100644
+index 5f59178fb..4e6ae7579 100644
 --- a/lld/ELF/SyntheticSections.h
 +++ b/lld/ELF/SyntheticSections.h
 @@ -26,6 +26,7 @@
@@ -1051,7 +1051,7 @@ index 5f59178fb54..4e6ae7579d2 100644
  // We create three instances of this class for .bss, .bss.rel.ro and "COMMON",
  // that are used for writable symbols, read-only symbols and common symbols,
 diff --git a/llvm/include/llvm/Analysis/CGSCCPassManager.h b/llvm/include/llvm/Analysis/CGSCCPassManager.h
-index 933f2210daf..bcba0939054 100644
+index 933f2210d..bcba09390 100644
 --- a/llvm/include/llvm/Analysis/CGSCCPassManager.h
 +++ b/llvm/include/llvm/Analysis/CGSCCPassManager.h
 @@ -19,7 +19,7 @@
@@ -1074,7 +1074,7 @@ index 933f2210daf..bcba0939054 100644
  /// graph and SCC structures. This means the structure the pass manager works
 diff --git a/llvm/include/llvm/Analysis/CallHierarchyAnalysis.h b/llvm/include/llvm/Analysis/CallHierarchyAnalysis.h
 new file mode 100644
-index 00000000000..04c8f6867b7
+index 000000000..04c8f6867
 --- /dev/null
 +++ b/llvm/include/llvm/Analysis/CallHierarchyAnalysis.h
 @@ -0,0 +1,93 @@
@@ -1172,7 +1172,7 @@ index 00000000000..04c8f6867b7
 +
 +#endif // LLVM_ANALYSIS_CALLHIERARCHYANALYSIS_H
 diff --git a/llvm/include/llvm/Analysis/LazyCallGraph.h b/llvm/include/llvm/Analysis/LazyCallGraph.h
-index 20a35bef189..ff24a6f0abc 100644
+index 20a35bef1..ff24a6f0a 100644
 --- a/llvm/include/llvm/Analysis/LazyCallGraph.h
 +++ b/llvm/include/llvm/Analysis/LazyCallGraph.h
 @@ -146,7 +146,7 @@ public:
@@ -1243,7 +1243,7 @@ index 20a35bef189..ff24a6f0abc 100644
    SpecificBumpPtrAllocator<SCC> SCCBPA;
  
 diff --git a/llvm/include/llvm/InitializePasses.h b/llvm/include/llvm/InitializePasses.h
-index a5e1310e28b..258840422e3 100644
+index a5e1310e2..258840422 100644
 --- a/llvm/include/llvm/InitializePasses.h
 +++ b/llvm/include/llvm/InitializePasses.h
 @@ -101,6 +101,7 @@ void initializeCallGraphDOTPrinterPass(PassRegistry&);
@@ -1255,7 +1255,7 @@ index a5e1310e28b..258840422e3 100644
  void initializeCalledValuePropagationLegacyPassPass(PassRegistry &);
  void initializeCodeGenPreparePass(PassRegistry&);
 diff --git a/llvm/include/llvm/Object/ELFTypes.h b/llvm/include/llvm/Object/ELFTypes.h
-index 7d1ade4d543..9b5512585e4 100644
+index 7d1ade4d5..9b5512585 100644
 --- a/llvm/include/llvm/Object/ELFTypes.h
 +++ b/llvm/include/llvm/Object/ELFTypes.h
 @@ -661,6 +661,7 @@ class Elf_Note_Iterator_Impl
@@ -1275,7 +1275,7 @@ index 7d1ade4d543..9b5512585e4 100644
      assert(Nhdr && "incremented ELF note end iterator");
      const uint8_t *NhdrPos = reinterpret_cast<const uint8_t *>(Nhdr);
 diff --git a/llvm/include/llvm/Transforms/Instrumentation/AddressSanitizer.h b/llvm/include/llvm/Transforms/Instrumentation/AddressSanitizer.h
-index 40007a9b8c5..fe23ca4bca0 100644
+index 40007a9b8..fe23ca4bc 100644
 --- a/llvm/include/llvm/Transforms/Instrumentation/AddressSanitizer.h
 +++ b/llvm/include/llvm/Transforms/Instrumentation/AddressSanitizer.h
 @@ -113,7 +113,7 @@ private:
@@ -1289,7 +1289,7 @@ index 40007a9b8c5..fe23ca4bca0 100644
  public:
 diff --git a/llvm/include/llvm/Transforms/Instrumentation/CallHierarchy.h b/llvm/include/llvm/Transforms/Instrumentation/CallHierarchy.h
 new file mode 100644
-index 00000000000..2b33b7d384e
+index 000000000..2b33b7d38
 --- /dev/null
 +++ b/llvm/include/llvm/Transforms/Instrumentation/CallHierarchy.h
 @@ -0,0 +1,31 @@
@@ -1325,7 +1325,7 @@ index 00000000000..2b33b7d384e
 +
 +#endif
 diff --git a/llvm/include/llvm/Transforms/Utils/LowerMemIntrinsics.h b/llvm/include/llvm/Transforms/Utils/LowerMemIntrinsics.h
-index 8e9d7b522c7..d5ce6d74632 100644
+index 8e9d7b522..d5ce6d746 100644
 --- a/llvm/include/llvm/Transforms/Utils/LowerMemIntrinsics.h
 +++ b/llvm/include/llvm/Transforms/Utils/LowerMemIntrinsics.h
 @@ -25,7 +25,7 @@ class TargetTransformInfo;
@@ -1338,7 +1338,7 @@ index 8e9d7b522c7..d5ce6d74632 100644
                                   Value *DstAddr, Value *CopyLen,
                                   unsigned SrcAlign, unsigned DestAlign,
 diff --git a/llvm/lib/Analysis/Analysis.cpp b/llvm/lib/Analysis/Analysis.cpp
-index af718526684..1373b40687e 100644
+index af7185266..1373b4068 100644
 --- a/llvm/lib/Analysis/Analysis.cpp
 +++ b/llvm/lib/Analysis/Analysis.cpp
 @@ -28,6 +28,7 @@ void llvm::initializeAnalysis(PassRegistry &Registry) {
@@ -1350,7 +1350,7 @@ index af718526684..1373b40687e 100644
    initializeCFGViewerLegacyPassPass(Registry);
    initializeCFGPrinterLegacyPassPass(Registry);
 diff --git a/llvm/lib/Analysis/CMakeLists.txt b/llvm/lib/Analysis/CMakeLists.txt
-index cc9ff0bc1f5..cf3850edcd4 100644
+index cc9ff0bc1..cf3850edc 100644
 --- a/llvm/lib/Analysis/CMakeLists.txt
 +++ b/llvm/lib/Analysis/CMakeLists.txt
 @@ -16,6 +16,7 @@ add_llvm_component_library(LLVMAnalysis
@@ -1363,7 +1363,7 @@ index cc9ff0bc1f5..cf3850edcd4 100644
    CmpInstAnalysis.cpp
 diff --git a/llvm/lib/Analysis/CallHierarchyAnalysis.cpp b/llvm/lib/Analysis/CallHierarchyAnalysis.cpp
 new file mode 100644
-index 00000000000..643d4892420
+index 000000000..643d48924
 --- /dev/null
 +++ b/llvm/lib/Analysis/CallHierarchyAnalysis.cpp
 @@ -0,0 +1,350 @@
@@ -1718,7 +1718,7 @@ index 00000000000..643d4892420
 +INITIALIZE_PASS(CallHierarchyPrinterLegacyPass, "print-call-hierarchy",
 +                "Print a call hierarchy", true, true)
 diff --git a/llvm/lib/Analysis/LazyCallGraph.cpp b/llvm/lib/Analysis/LazyCallGraph.cpp
-index ef31c1e0ba8..f7311b86622 100644
+index ef31c1e0b..f7311b866 100644
 --- a/llvm/lib/Analysis/LazyCallGraph.cpp
 +++ b/llvm/lib/Analysis/LazyCallGraph.cpp
 @@ -99,14 +99,21 @@ LazyCallGraph::EdgeSequence &LazyCallGraph::Node::populateSlow() {
@@ -1786,7 +1786,7 @@ index ef31c1e0ba8..f7311b86622 100644
  ///
  /// This routine both updates a postorder sequence and uses that sequence to
 diff --git a/llvm/lib/Passes/PassBuilder.cpp b/llvm/lib/Passes/PassBuilder.cpp
-index 53b7db8689c..0be2a69550c 100644
+index 53b7db868..0be2a6955 100644
 --- a/llvm/lib/Passes/PassBuilder.cpp
 +++ b/llvm/lib/Passes/PassBuilder.cpp
 @@ -27,6 +27,7 @@
@@ -1806,7 +1806,7 @@ index 53b7db8689c..0be2a69550c 100644
  #include "llvm/Transforms/Instrumentation/ControlHeightReduction.h"
  #include "llvm/Transforms/Instrumentation/GCOVProfiler.h"
 diff --git a/llvm/lib/Passes/PassRegistry.def b/llvm/lib/Passes/PassRegistry.def
-index 355dd6f9681..ade89ab52eb 100644
+index 355dd6f96..ade89ab52 100644
 --- a/llvm/lib/Passes/PassRegistry.def
 +++ b/llvm/lib/Passes/PassRegistry.def
 @@ -7,7 +7,7 @@
@@ -1843,7 +1843,7 @@ index 355dd6f9681..ade89ab52eb 100644
  MODULE_PASS("print-stack-safety", StackSafetyGlobalPrinterPass(dbgs()))
  MODULE_PASS("rewrite-statepoints-for-gc", RewriteStatepointsForGC())
 diff --git a/llvm/lib/Transforms/Instrumentation/CMakeLists.txt b/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
-index 9316de4eb32..f52ec2b10f7 100644
+index 9316de4eb..f52ec2b10 100644
 --- a/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
 +++ b/llvm/lib/Transforms/Instrumentation/CMakeLists.txt
 @@ -1,6 +1,7 @@
@@ -1856,7 +1856,7 @@ index 9316de4eb32..f52ec2b10f7 100644
    DataFlowSanitizer.cpp
 diff --git a/llvm/lib/Transforms/Instrumentation/CallHierarchy.cpp b/llvm/lib/Transforms/Instrumentation/CallHierarchy.cpp
 new file mode 100644
-index 00000000000..7b6354fbd60
+index 000000000..7cb9fa8ba
 --- /dev/null
 +++ b/llvm/lib/Transforms/Instrumentation/CallHierarchy.cpp
 @@ -0,0 +1,80 @@
